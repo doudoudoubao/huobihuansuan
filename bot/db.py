@@ -11,13 +11,14 @@ from typing import Any, Iterable, Sequence
 import aiosqlite
 
 from .config import Config
+from .currencies import FILLER
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id      INTEGER PRIMARY KEY,
     lang         TEXT    NOT NULL DEFAULT 'zh',
     base         TEXT    NOT NULL DEFAULT 'CNY',
-    favorites    TEXT    NOT NULL DEFAULT 'USD,EUR,JPY,HKD,GBP',
+    favorites    TEXT    NOT NULL DEFAULT 'USD,HKD,EUR,JPY,GBP,KRW,TWD,SGD,AUD,THB',
     decimals     INTEGER NOT NULL DEFAULT 2,
     group_sep    INTEGER NOT NULL DEFAULT 1,
     show_source  INTEGER NOT NULL DEFAULT 1,
@@ -81,14 +82,34 @@ class UserPrefs:
     tz: str = "Asia/Shanghai"
     fee_percent: Decimal | None = None
 
-    def targets_for(self, source: str, limit: int = 6) -> list[str]:
-        """给定源币种，返回默认要展示的目标币种列表。"""
+    def targets_for(self, source: str, limit: int = 10) -> list[str]:
+        """给定源币种，返回默认要展示的目标币种列表。
+
+        顺序为：默认币种 → 常用币种 → 主流货币补齐，
+        保证「只发一个金额」也能一次看到 limit 行，不用再手打目标货币。
+        """
         source = source.upper()
-        out = [c for c in self.favorites if c != source]
-        if not out:
-            out = [c for c in ("USD", "EUR", "JPY", "HKD") if c != source]
-        if self.base.upper() != source and self.base.upper() not in out:
-            out.insert(0, self.base.upper())
+        out: list[str] = []
+        seen = {source}
+
+        home = self.base.upper()
+        if home != source:
+            out.append(home)
+            seen.add(home)
+
+        for code in self.favorites:
+            code = code.upper()
+            if code not in seen:
+                out.append(code)
+                seen.add(code)
+
+        for code in FILLER:
+            if len(out) >= limit:
+                break
+            if code not in seen:
+                out.append(code)
+                seen.add(code)
+
         return out[:limit]
 
 

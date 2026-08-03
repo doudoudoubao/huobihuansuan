@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import formatting as fmt
 from .. import keyboards as kb
+from ..config import Config
 from ..db import Database, UserPrefs
 from ..i18n import t
 from ..rates.service import RateService, RateUnavailable
@@ -29,22 +30,26 @@ _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{4,})")
 
 @router.message(Command("convert", "c", "conv"))
 async def cmd_convert(
-    message: Message, prefs: UserPrefs, rates: RateService, db: Database
+    message: Message, prefs: UserPrefs, rates: RateService, db: Database, config: Config
 ) -> None:
     args = command_args(message)
     if not args:
         await message.answer(t(prefs.lang, "no_match"))
         return
-    rendered = await respond_to_text(args, prefs, rates, db)
+    rendered = await respond_to_text(
+        args, prefs, rates, db, target_count=config.multi_target_count
+    )
     if rendered:
         await message.answer(rendered.text, reply_markup=rendered.keyboard, disable_web_page_preview=True)
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text & ~F.text.startswith("/"))
 async def on_private_text(
-    message: Message, prefs: UserPrefs, rates: RateService, db: Database
+    message: Message, prefs: UserPrefs, rates: RateService, db: Database, config: Config
 ) -> None:
-    rendered = await respond_to_text(message.text or "", prefs, rates, db)
+    rendered = await respond_to_text(
+        message.text or "", prefs, rates, db, target_count=config.multi_target_count
+    )
     if rendered is None:
         return
     await message.answer(rendered.text, reply_markup=rendered.keyboard, disable_web_page_preview=True)
@@ -52,7 +57,7 @@ async def on_private_text(
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text & ~F.text.startswith("/"))
 async def on_group_text(
-    message: Message, prefs: UserPrefs, rates: RateService, db: Database
+    message: Message, prefs: UserPrefs, rates: RateService, db: Database, config: Config
 ) -> None:
     """群聊里保持克制。
 
@@ -79,6 +84,7 @@ async def on_group_text(
         quiet=not addressed,
         require_currency=True,
         require_target=not addressed,
+        target_count=config.multi_target_count,
     )
     if rendered is None or not rendered.ok:
         return
@@ -144,20 +150,36 @@ async def cb_refresh(query: CallbackQuery, prefs: UserPrefs, rates: RateService)
     )
 
 
-@router.callback_query(F.data.startswith("multi|"))
-async def cb_multi(query: CallbackQuery, prefs: UserPrefs, rates: RateService, db: Database) -> None:
-    _, parts = kb.unpack(query.data or "")
+@router.callback_query(F.data.startswith("multi|") | F.data.startswith("mref|"))
+async def cb_multi(
+    query: CallbackQuery, prefs: UserPrefs, rates: RateService, db: Database, config: Config
+) -> None:
+    """多币种速览：`multi` 展开更多币种，`mref` 强制刷新后重绘。"""
+    action, parts = kb.unpack(query.data or "")
     if not parts:
         await query.answer()
         return
     base = parts[0]
     amount = parse_decimal(parts[1]) if len(parts) > 1 else Decimal(1)
-    targets = await db.top_codes(prefs.user_id, limit=10) or []
-    merged = [c for c in dict.fromkeys(prefs.targets_for(base, limit=8) + targets) if c != base][:8]
-    rendered = await build_conversion(amount, base, merged, prefs, rates)
+    count = config.multi_target_count
+
+    if action == "mref":
+        targets = prefs.targets_for(base, limit=count)
+    else:
+        # 「更多币种」把最近用过的也并进来，铺得更满一些
+        recent = await db.top_codes(prefs.user_id, limit=10) or []
+        targets = [
+            code
+            for code in dict.fromkeys(prefs.targets_for(base, limit=count) + recent)
+            if code != base
+        ][: count + 5]
+
+    rates.note_usage([base, *targets])
+    refreshed = await rates.force_refresh() if action == "mref" else 0
+    rendered = await build_conversion(amount, base, targets, prefs, rates)
     if query.message:
         await safe_edit(query.message, rendered.text, rendered.keyboard)  # type: ignore[arg-type]
-    await query.answer()
+    await query.answer(t(prefs.lang, "refreshed", n=refreshed) if action == "mref" else None)
 
 
 @router.callback_query(F.data.startswith("al|"))

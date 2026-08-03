@@ -13,6 +13,7 @@ from aiogram.types import (
 
 from .. import currencies as cur_mod
 from .. import formatting as fmt
+from ..config import Config
 from ..db import UserPrefs
 from ..i18n import t
 from ..parser import parse
@@ -43,7 +44,9 @@ def _article(
 
 
 @router.inline_query()
-async def on_inline(query: InlineQuery, prefs: UserPrefs, rates: RateService) -> None:
+async def on_inline(
+    query: InlineQuery, prefs: UserPrefs, rates: RateService, config: Config
+) -> None:
     text = (query.query or "").strip()
     lang = prefs.lang
 
@@ -72,7 +75,9 @@ async def on_inline(query: InlineQuery, prefs: UserPrefs, rates: RateService) ->
         return
 
     source = parsed.source or prefs.base
-    targets = [c for c in parsed.targets if c != source] or prefs.targets_for(source, limit=MAX_RESULTS)
+    targets = [c for c in parsed.targets if c != source] or prefs.targets_for(
+        source, limit=max(config.multi_target_count, MAX_RESULTS)
+    )
     fee = parsed.fee_percent if parsed.fee_percent is not None else prefs.fee_percent
     rates.note_usage([source, *targets])
 

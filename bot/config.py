@@ -75,8 +75,14 @@ class Config:
     # --- 默认用户偏好 ---
     default_base: str = field(default_factory=lambda: _env_str("DEFAULT_BASE", "CNY").upper())
     default_favorites: list[str] = field(
-        default_factory=lambda: _env_list("DEFAULT_FAVORITES", ["USD", "EUR", "JPY", "HKD", "GBP"])
+        default_factory=lambda: _env_list(
+            "DEFAULT_FAVORITES",
+            ["USD", "HKD", "EUR", "JPY", "GBP", "KRW", "TWD", "SGD", "AUD", "THB"],
+        )
     )
+    # 一次「多币种速览」默认列几行；常用列表不够长时用主流货币补齐
+    multi_target_count: int = field(default_factory=lambda: _env_int("MULTI_TARGET_COUNT", 10))
+    max_favorites: int = field(default_factory=lambda: _env_int("MAX_FAVORITES", 20))
     default_lang: str = field(default_factory=lambda: _env_str("DEFAULT_LANG", "zh"))
     default_decimals: int = field(default_factory=lambda: _env_int("DEFAULT_DECIMALS", 2))
     default_tz: str = field(default_factory=lambda: _env_str("DEFAULT_TZ", "Asia/Shanghai"))

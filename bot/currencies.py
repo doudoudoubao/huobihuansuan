@@ -198,6 +198,26 @@ CRYPTO_CODES: frozenset[str] = frozenset(c.code for c in _CRYPTO)
 # 主流货币，用于快捷键盘 / 空查询建议
 POPULAR: tuple[str, ...] = ("CNY", "USD", "EUR", "JPY", "HKD", "GBP", "KRW", "TWD", "SGD", "AUD", "CAD", "THB")
 
+# 常用列表不够长时，按这个顺序补齐，保证一次总能看到足够多的行
+FILLER: tuple[str, ...] = (
+    "USD", "HKD", "EUR", "JPY", "GBP", "KRW", "TWD", "SGD", "AUD", "CAD",
+    "THB", "CHF", "NZD", "MYR", "PHP", "VND", "RUB", "INR", "MOP", "IDR",
+)
+
+# 「常用币种」选择面板的候选池（分页展示）
+PICKER_POOL: tuple[str, ...] = (
+    # 亚太
+    "USD", "CNY", "HKD", "JPY", "KRW", "TWD", "SGD", "MOP", "THB", "MYR",
+    "PHP", "VND", "IDR", "INR", "AUD", "NZD", "KHR", "LAK", "MMK", "BDT",
+    # 欧美中东
+    "EUR", "GBP", "CHF", "CAD", "RUB", "SEK", "NOK", "DKK", "PLN", "CZK",
+    "TRY", "AED", "SAR", "ILS", "UAH", "HUF", "RON", "KZT", "BRL", "MXN",
+    "ZAR", "ARS", "EGP", "NGN",
+    # 加密与贵金属
+    "USDT", "USDC", "BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "TRX", "TON",
+    "XAU", "XAG",
+)
+
 # 符号 → 候选货币（顺序即优先级）。¥ / $ 天然有歧义，交给上下文消歧。
 SYMBOL_MAP: dict[str, tuple[str, ...]] = {
     "$": ("USD", "HKD", "TWD", "SGD", "AUD", "CAD"),

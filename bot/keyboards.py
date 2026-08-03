@@ -81,12 +81,31 @@ def conversion_keyboard(
     return builder.as_markup()
 
 
-def multi_keyboard(base: str, amount: Decimal, prefs: UserPrefs) -> InlineKeyboardMarkup:
+def multi_keyboard(
+    base: str, amount: Decimal, prefs: UserPrefs, *, quotes: Sequence[str] = ()
+) -> InlineKeyboardMarkup:
+    """多币种速览下方：刷新 / 编辑常用 / 关闭，再加一排「看单个货币详情」。"""
     lang = prefs.lang
     amt = _amount_token(amount)
     builder = InlineKeyboardBuilder()
+
+    row: list[InlineKeyboardButton] = []
+    for code in list(quotes)[:8]:
+        meta = cur_mod.get(code)
+        row.append(
+            InlineKeyboardButton(
+                text=f"{meta.flag}{code}".strip(), callback_data=pack("cv", base, code, amt)
+            )
+        )
+        if len(row) == 4:
+            builder.row(*row)
+            row = []
+    if row:
+        builder.row(*row)
+
     builder.row(
-        InlineKeyboardButton(text=t(lang, "btn_refresh"), callback_data=pack("multi", base, amt)),
+        InlineKeyboardButton(text=t(lang, "btn_refresh"), callback_data=pack("mref", base, amt)),
+        InlineKeyboardButton(text=t(lang, "btn_edit_fav"), callback_data=pack("st", "fav")),
         InlineKeyboardButton(text=t(lang, "btn_close"), callback_data=pack("close")),
     )
     return builder.as_markup()
@@ -189,22 +208,46 @@ def base_picker_keyboard(prefs: UserPrefs, codes: Iterable[str] | None = None) -
     return builder.as_markup()
 
 
-def fav_picker_keyboard(prefs: UserPrefs) -> InlineKeyboardMarkup:
+FAV_PAGE_SIZE = 15  # 5 行 × 3 列
+
+
+def fav_pool(prefs: UserPrefs) -> list[str]:
+    """候选池顺序固定，翻页时按钮不会因为勾选而跳动。"""
+    return list(dict.fromkeys(list(cur_mod.PICKER_POOL) + [c.upper() for c in prefs.favorites]))
+
+
+def fav_picker_keyboard(prefs: UserPrefs, page: int = 0) -> InlineKeyboardMarkup:
+    pool = fav_pool(prefs)
+    pages = max(1, -(-len(pool) // FAV_PAGE_SIZE))
+    page = max(0, min(page, pages - 1))
+    chunk = pool[page * FAV_PAGE_SIZE : (page + 1) * FAV_PAGE_SIZE]
+
     builder = InlineKeyboardBuilder()
     row: list[InlineKeyboardButton] = []
-    pool = list(dict.fromkeys(list(cur_mod.POPULAR) + prefs.favorites + ["USDT", "BTC", "ETH"]))
-    for code in pool:
+    for code in chunk:
         meta = cur_mod.get(code)
         mark = "✅" if code in prefs.favorites else "▫️"
         row.append(
-            InlineKeyboardButton(text=f"{mark}{meta.flag}{code}", callback_data=pack("st", "favtog", code))
+            InlineKeyboardButton(
+                text=f"{mark}{meta.flag}{code}", callback_data=pack("st", "favtog", code, page)
+            )
         )
         if len(row) == 3:
             builder.row(*row)
             row = []
     if row:
         builder.row(*row)
-    builder.row(InlineKeyboardButton(text=t(prefs.lang, "btn_back"), callback_data=pack("st", "home")))
+
+    if pages > 1:
+        builder.row(
+            InlineKeyboardButton(text="◀️", callback_data=pack("st", "favpg", (page - 1) % pages)),
+            InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data=pack("st", "favpg", page)),
+            InlineKeyboardButton(text="▶️", callback_data=pack("st", "favpg", (page + 1) % pages)),
+        )
+    builder.row(
+        InlineKeyboardButton(text=t(prefs.lang, "btn_fav_reset"), callback_data=pack("st", "favrst", page)),
+        InlineKeyboardButton(text=t(prefs.lang, "btn_back"), callback_data=pack("st", "home")),
+    )
     return builder.as_markup()
 
 

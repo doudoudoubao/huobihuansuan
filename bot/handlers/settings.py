@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 from .. import currencies as cur_mod
 from .. import formatting as fmt
 from .. import keyboards as kb
+from ..config import Config
 from ..db import Database, UserPrefs
 from ..i18n import t
 from ..parser import parse_currency_list
@@ -57,22 +59,80 @@ async def cmd_setbase(message: Message, prefs: UserPrefs, db: Database) -> None:
     await message.answer(t(updated.lang, "base_set", base=codes[0]))
 
 
-@router.message(Command("fav", "favorites", "favourite", "sc"))
-async def cmd_fav(message: Message, prefs: UserPrefs, db: Database) -> None:
-    args = command_args(message)
-    if not args:
-        current = " ".join(prefs.favorites) or "—"
-        await message.answer(
-            f"{t(prefs.lang, 'settings_fav', fav=fmt.esc(current))}\n{t(prefs.lang, 'usage_fav')}",
-            reply_markup=kb.fav_picker_keyboard(prefs),
-        )
+_SPLIT_RE = re.compile(r"[\s,，、;；]+")
+
+
+def fav_panel_text(prefs: UserPrefs, config: Config) -> str:
+    pretty = " ".join(f"{cur_mod.get(c).flag}{c}" for c in prefs.favorites) or "—"
+    return t(
+        prefs.lang,
+        "usage_fav",
+        fav=fmt.esc(pretty),
+        n=len(prefs.favorites),
+        max=config.max_favorites,
+    )
+
+
+def _parse_fav_edit(args: str, *, default_sign: str = "") -> tuple[list[str], list[str], bool]:
+    """把 `+KRW -GBP JPY` 拆成 (要加的, 要删的, 是否增量模式)。"""
+    add: list[str] = []
+    remove: list[str] = []
+    incremental = bool(default_sign)
+    for chunk in _SPLIT_RE.split(args.strip()):
+        if not chunk:
+            continue
+        sign = default_sign
+        while chunk and chunk[0] in "+-＋－":
+            sign = "-" if chunk[0] in "-－" else "+"
+            incremental = True
+            chunk = chunk[1:]
+        code = cur_mod.resolve_code(chunk)
+        if not code:
+            continue
+        (remove if sign == "-" else add).append(code)
+    return add, remove, incremental
+
+
+async def _apply_fav_edit(
+    message: Message, prefs: UserPrefs, db: Database, config: Config, args: str, *, default_sign: str = ""
+) -> None:
+    add, remove, incremental = _parse_fav_edit(args, default_sign=default_sign)
+    if not add and not remove:
+        await message.answer(fav_panel_text(prefs, config), reply_markup=kb.fav_picker_keyboard(prefs))
         return
-    codes = parse_currency_list(args, limit=12)
-    if not codes:
-        await message.answer(t(prefs.lang, "usage_fav"))
-        return
-    updated = await db.update_prefs(prefs.user_id, favorites=codes)
-    await message.answer(t(updated.lang, "fav_set", fav=fmt.esc(" ".join(codes))))
+
+    if incremental:
+        favorites = [c for c in prefs.favorites if c not in remove]
+        for code in add:
+            if code not in favorites:
+                favorites.append(code)
+    else:
+        favorites = list(dict.fromkeys(add))
+
+    trimmed = len(favorites) > config.max_favorites
+    favorites = favorites[: config.max_favorites]
+    updated = await db.update_prefs(prefs.user_id, favorites=favorites)
+
+    pretty = " ".join(f"{cur_mod.get(c).flag}{c}" for c in favorites) or "—"
+    text = t(updated.lang, "fav_set", fav=fmt.esc(pretty), n=len(favorites))
+    if trimmed:
+        text += "\n" + t(updated.lang, "fav_limit", max=config.max_favorites)
+    await message.answer(text)
+
+
+@router.message(Command("fav", "favorites", "favourite", "sc", "hot"))
+async def cmd_fav(message: Message, prefs: UserPrefs, db: Database, config: Config) -> None:
+    await _apply_fav_edit(message, prefs, db, config, command_args(message))
+
+
+@router.message(Command("add", "addfav"))
+async def cmd_add_fav(message: Message, prefs: UserPrefs, db: Database, config: Config) -> None:
+    await _apply_fav_edit(message, prefs, db, config, command_args(message), default_sign="+")
+
+
+@router.message(Command("del", "rm", "delfav"))
+async def cmd_del_fav(message: Message, prefs: UserPrefs, db: Database, config: Config) -> None:
+    await _apply_fav_edit(message, prefs, db, config, command_args(message), default_sign="-")
 
 
 @router.message(Command("lang", "language", "yy"))
@@ -130,7 +190,9 @@ async def cmd_fee(message: Message, prefs: UserPrefs, db: Database) -> None:
 
 
 @router.callback_query(F.data.startswith("st|"))
-async def cb_settings(query: CallbackQuery, prefs: UserPrefs, db: Database) -> None:
+async def cb_settings(
+    query: CallbackQuery, prefs: UserPrefs, db: Database, config: Config
+) -> None:
     _, parts = kb.unpack(query.data or "")
     action = parts[0] if parts else "home"
     value = parts[1] if len(parts) > 1 else None
@@ -138,6 +200,9 @@ async def cb_settings(query: CallbackQuery, prefs: UserPrefs, db: Database) -> N
     if message is None:
         await query.answer()
         return
+
+    def page_of(raw: str | None) -> int:
+        return int(raw) if raw and raw.isdigit() else 0
 
     if action == "home":
         await safe_edit(message, settings_text(prefs), kb.settings_keyboard(prefs))  # type: ignore[arg-type]
@@ -154,24 +219,35 @@ async def cb_settings(query: CallbackQuery, prefs: UserPrefs, db: Database) -> N
             await query.answer()
         return
 
-    if action == "fav":
-        await safe_edit(message, t(prefs.lang, "usage_fav"), kb.fav_picker_keyboard(prefs))  # type: ignore[arg-type]
+    if action in ("fav", "favpg"):
+        page = page_of(value)
+        await safe_edit(message, fav_panel_text(prefs, config), kb.fav_picker_keyboard(prefs, page))  # type: ignore[arg-type]
         await query.answer()
         return
 
     if action == "favtog" and value:
         code = value.upper()
+        page = page_of(parts[2] if len(parts) > 2 else None)
         favorites = list(prefs.favorites)
         if code in favorites:
             favorites.remove(code)
-        elif len(favorites) < 12:
+        elif len(favorites) < config.max_favorites:
             favorites.append(code)
         else:
-            await query.answer("最多 12 个" if prefs.lang == "zh" else "Max 12", show_alert=True)
+            await query.answer(
+                t(prefs.lang, "fav_limit", max=config.max_favorites), show_alert=True
+            )
             return
         prefs = await db.update_prefs(prefs.user_id, favorites=favorites)
-        await safe_edit(message, t(prefs.lang, "usage_fav"), kb.fav_picker_keyboard(prefs))  # type: ignore[arg-type]
-        await query.answer()
+        await safe_edit(message, fav_panel_text(prefs, config), kb.fav_picker_keyboard(prefs, page))  # type: ignore[arg-type]
+        await query.answer(("✅ " if code in favorites else "▫️ ") + code)
+        return
+
+    if action == "favrst":
+        page = page_of(value)
+        prefs = await db.update_prefs(prefs.user_id, favorites=list(config.default_favorites))
+        await safe_edit(message, fav_panel_text(prefs, config), kb.fav_picker_keyboard(prefs, page))  # type: ignore[arg-type]
+        await query.answer(t(prefs.lang, "fav_reset"))
         return
 
     if action == "dec":

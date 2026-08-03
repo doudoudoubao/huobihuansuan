@@ -104,6 +104,7 @@ class RateService:
         self._tasks: list[asyncio.Task] = []
         self._lock = asyncio.Lock()
         self._ready = asyncio.Event()
+        self._last_force = 0.0
         self._cache_file = Path(config.db_path).with_name("rates_cache.json")
 
     # --- 生命周期 -----------------------------------------------------------
@@ -189,7 +190,12 @@ class RateService:
             self._save_cache()
         return succeeded
 
-    async def force_refresh(self) -> int:
+    async def force_refresh(self, min_interval: float = 5.0) -> int:
+        """用户点「刷新」时调用。带全局冷却，防止连点把数据源打爆。"""
+        now = time.time()
+        if now - self._last_force < min_interval:
+            return len(self._results)
+        self._last_force = now
         return await self.refresh(kinds=("fiat", "crypto", "mixed"), force=True)
 
     def inject(self, provider: str, quotes: dict[str, Decimal], *, as_of: float | None = None) -> None:

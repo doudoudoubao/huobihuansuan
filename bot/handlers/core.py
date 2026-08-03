@@ -28,11 +28,14 @@ class Rendered:
     ok: bool = True
 
 
-def resolve_targets(result: ParseResult, prefs: UserPrefs, source: str) -> list[str]:
+def resolve_targets(
+    result: ParseResult, prefs: UserPrefs, source: str, *, count: int = 10
+) -> list[str]:
+    """用户写了目标货币就听他的；没写就给一屏常用币种速览。"""
     targets = [code for code in result.targets if code != source]
     if targets:
         return targets
-    return prefs.targets_for(source)
+    return prefs.targets_for(source, limit=count)
 
 
 async def build_conversion(
@@ -72,7 +75,11 @@ async def build_conversion(
     text = fmt.render_multi(
         amount, source, conversions, prefs, missing=missing, fee_percent=fee_percent, expression=expression
     )
-    keyboard = kb.multi_keyboard(source, amount, prefs) if with_keyboard else None
+    keyboard = (
+        kb.multi_keyboard(source, amount, prefs, quotes=[c.quote for c in conversions])
+        if with_keyboard
+        else None
+    )
     return Rendered(text, keyboard)
 
 
@@ -86,6 +93,7 @@ async def respond_to_text(
     with_keyboard: bool = True,
     require_currency: bool = False,
     require_target: bool = False,
+    target_count: int = 10,
 ) -> Rendered | None:
     """解析一段自由文本并生成回复；`quiet=True`（群聊）时看不懂就返回 None。
 
@@ -116,7 +124,7 @@ async def respond_to_text(
     if not cur_mod.is_known(source):
         return Rendered(t(prefs.lang, "unavailable", code=source), ok=False)
 
-    targets = resolve_targets(result, prefs, source)
+    targets = resolve_targets(result, prefs, source, count=target_count)
     fee = result.fee_percent if result.fee_percent is not None else prefs.fee_percent
 
     if db is not None:

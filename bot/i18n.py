@@ -8,12 +8,15 @@ ZH: dict[str, str] = {
     "start_title": "💱 <b>货币换算助手</b>",
     "start_body": (
         "直接发消息就能换算，<b>不用记命令</b>：\n"
+        "• <code>100rmb</code>　<code>100</code>　只发金额就出一屏常用货币\n"
         "• <code>100 usd cny</code>　<code>100美元换人民币</code>\n"
         "• <code>100刀</code>　<code>1000円多少钱</code>　<code>$100</code>\n"
         "• <code>(23.5+40)*3 eur cny</code>　算式直接算\n"
         "• <code>100 usd cny jpy krw</code>　一次换多种\n"
         "• <code>100 usd cny +2%</code>　带手续费\n"
         "• <code>1.5k usd</code>　<code>10万日元</code>　支持万/亿/k/w\n\n"
+        "那一屏列哪些货币由「常用币种」决定：/fav 点按增删，"
+        "或 <code>/add 韩元</code>、<code>/del 英镑</code>。\n\n"
         "在任意聊天里输入 <code>@{username} 100 usd jpy</code> 可直接发送结果。\n\n"
         "常用命令：/rate 汇率 · /chart 走势 · /alert 到价提醒 · /subscribe 每日播报 · /settings 设置 · /help 全部帮助"
     ),
@@ -42,6 +45,8 @@ ZH: dict[str, str] = {
     "btn_chart": "📈 走势",
     "btn_alert": "🔔 提醒",
     "btn_more": "➕ 更多币种",
+    "btn_edit_fav": "⭐ 常用",
+    "btn_fav_reset": "↺ 恢复默认",
     "btn_back": "◀️ 返回",
     "btn_close": "✖️ 关闭",
     "settings_title": "⚙️ <b>设置</b>",
@@ -56,10 +61,20 @@ ZH: dict[str, str] = {
     "on": "开",
     "off": "关",
     "base_set": "✅ 默认币种已设为 <b>{base}</b>",
-    "fav_set": "✅ 收藏币种已更新：<b>{fav}</b>",
+    "fav_set": "✅ 常用币种已更新（{n} 个）：\n<b>{fav}</b>",
+    "fav_limit": "常用币种最多 {max} 个，多出来的已忽略。",
+    "fav_reset": "↺ 已恢复默认常用币种",
     "fav_empty": "收藏列表为空，用 <code>/fav USD JPY EUR</code> 设置。",
     "usage_base": "用法：<code>/setbase CNY</code>",
-    "usage_fav": "用法：<code>/fav USD EUR JPY HKD</code>（最多 12 个）",
+    "usage_fav": (
+        "⭐ <b>常用币种</b>（决定只发金额时列出哪些）\n"
+        "当前（{n}/{max}）：{fav}\n\n"
+        "点下面的按钮增删，或者直接打字：\n"
+        "<code>/fav USD EUR JPY HKD</code>　整份替换\n"
+        "<code>/fav +KRW +THB</code>　追加\n"
+        "<code>/fav -GBP</code>　移除\n"
+        "也可以用 <code>/add 韩元</code> 和 <code>/del 英镑</code>"
+    ),
     "usage_alert": (
         "用法：\n"
         "<code>/alert usd cny &gt; 7.3</code> 涨到就提醒\n"
@@ -108,12 +123,15 @@ EN: dict[str, str] = {
     "start_title": "💱 <b>Currency Converter</b>",
     "start_body": (
         "Just type — <b>no commands needed</b>:\n"
+        "• <code>100usd</code>　<code>100</code>　an amount alone lists your favourites\n"
         "• <code>100 usd cny</code>　<code>100 bucks to yen</code>\n"
         "• <code>$100</code>　<code>￥1000</code>\n"
         "• <code>(23.5+40)*3 eur cny</code>　inline math\n"
         "• <code>100 usd cny jpy krw</code>　multi-target\n"
         "• <code>100 usd cny +2%</code>　with a fee\n"
         "• <code>1.5k usd</code>　k / m / b suffixes\n\n"
+        "That list is your favourites: /fav to tap through them, "
+        "or <code>/add krw</code> / <code>/del gbp</code>.\n\n"
         "In any chat type <code>@{username} 100 usd jpy</code> to send a result.\n\n"
         "Commands: /rate · /chart · /alert · /subscribe · /settings · /help"
     ),
@@ -142,6 +160,8 @@ EN: dict[str, str] = {
     "btn_chart": "📈 Chart",
     "btn_alert": "🔔 Alert",
     "btn_more": "➕ More",
+    "btn_edit_fav": "⭐ Favourites",
+    "btn_fav_reset": "↺ Reset",
     "btn_back": "◀️ Back",
     "btn_close": "✖️ Close",
     "settings_title": "⚙️ <b>Settings</b>",
@@ -156,10 +176,20 @@ EN: dict[str, str] = {
     "on": "on",
     "off": "off",
     "base_set": "✅ Home currency set to <b>{base}</b>",
-    "fav_set": "✅ Favourites updated: <b>{fav}</b>",
+    "fav_set": "✅ Favourites updated ({n}):\n<b>{fav}</b>",
+    "fav_limit": "At most {max} favourites; extras ignored.",
+    "fav_reset": "↺ Favourites reset to defaults",
     "fav_empty": "No favourites yet. Use <code>/fav USD JPY EUR</code>.",
     "usage_base": "Usage: <code>/setbase USD</code>",
-    "usage_fav": "Usage: <code>/fav USD EUR JPY HKD</code> (max 12)",
+    "usage_fav": (
+        "⭐ <b>Favourites</b> (what an amount-only message lists)\n"
+        "Current ({n}/{max}): {fav}\n\n"
+        "Tap below, or type:\n"
+        "<code>/fav USD EUR JPY HKD</code>　replace\n"
+        "<code>/fav +KRW +THB</code>　add\n"
+        "<code>/fav -GBP</code>　remove\n"
+        "or use <code>/add krw</code> and <code>/del gbp</code>"
+    ),
     "usage_alert": (
         "Usage:\n"
         "<code>/alert usd cny &gt; 7.3</code>\n"

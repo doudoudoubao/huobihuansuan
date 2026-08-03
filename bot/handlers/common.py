@@ -11,6 +11,7 @@ from aiogram.types import Message
 
 from .. import currencies as cur_mod
 from .. import formatting as fmt
+from ..config import Config
 from ..db import Database, UserPrefs
 from ..i18n import t
 from ..keyboards import settings_keyboard
@@ -23,7 +24,8 @@ router = Router(name="common")
 HELP_ZH = """📖 <b>使用手册</b>
 
 <b>① 直接打字换算（推荐）</b>
-<code>100 usd cny</code>　<code>100usd</code>　<code>100</code>
+<code>100rmb</code>　<code>100</code>　只发金额 → 一屏常用货币（默认 10 个）
+<code>100 usd cny</code>　<code>100usd</code>
 <code>100美元换人民币</code>　<code>1000円多少钱</code>　<code>100刀</code>
 <code>$100</code>　<code>￥500</code>　<code>🇯🇵1000</code>
 <code>100 usd cny jpy krw</code>　一次换多种
@@ -48,7 +50,9 @@ HELP_ZH = """📖 <b>使用手册</b>
 
 <b>④ 个性化</b>
 /setbase CNY　默认币种
-/fav USD EUR JPY HKD　收藏币种（决定「一次多换」的列表）
+/fav　常用币种面板，点按增删（决定「只发金额」时列哪些）
+/fav USD EUR JPY HKD　整份替换
+/add 韩元 泰铢　追加；/del 英镑　移除
 /fee 2　默认手续费；/fee off 关闭
 /decimals 2　小数位
 /lang　中英切换
@@ -67,7 +71,8 @@ HELP_ZH = """📖 <b>使用手册</b>
 HELP_EN = """📖 <b>Manual</b>
 
 <b>① Just type (recommended)</b>
-<code>100 usd cny</code>　<code>100usd</code>　<code>100</code>
+<code>100usd</code>　<code>100</code>　amount alone → 10 favourites at once
+<code>100 usd cny</code>
 <code>$100</code>　<code>￥500</code>　<code>🇯🇵1000</code>
 <code>100 usd cny jpy krw</code>　multi-target
 <code>(23.5+40)*3 eur cny</code>　inline math
@@ -87,7 +92,8 @@ HELP_EN = """📖 <b>Manual</b>
 /alerts · /subscribe 09:00 usd cny · /subs
 
 <b>④ Preferences</b>
-/setbase USD · /fav USD EUR JPY · /fee 2
+/fav　tap-to-toggle favourites panel (what an amount alone lists)
+/add krw thb · /del gbp · /setbase USD · /fee 2
 /decimals 2 · /lang · /settings
 
 <b>⑤ Anywhere</b>
@@ -101,7 +107,9 @@ Mention me, reply to me, or use <code>/c 100 usd cny</code>.
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, prefs: UserPrefs, rates: RateService) -> None:
+async def cmd_start(
+    message: Message, prefs: UserPrefs, rates: RateService, config: Config
+) -> None:
     me = await message.bot.me()
     username = me.username or "bot"
     text = (
@@ -110,12 +118,16 @@ async def cmd_start(message: Message, prefs: UserPrefs, rates: RateService) -> N
     )
     await message.answer(text, disable_web_page_preview=True)
 
-    # 顺手给一条示例结果，用户第一眼就知道长什么样
+    # 顺手演示一次「只发金额」的效果，第一眼就知道长什么样
     from .core import build_conversion
 
-    source = prefs.favorites[0] if prefs.favorites else "USD"
+    source = prefs.base
     rendered = await build_conversion(
-        Decimal(100), source, prefs.targets_for(source, limit=5), prefs, rates
+        Decimal(100),
+        source,
+        prefs.targets_for(source, limit=config.multi_target_count),
+        prefs,
+        rates,
     )
     if rendered.ok:
         await message.answer(rendered.text, reply_markup=rendered.keyboard, disable_web_page_preview=True)
