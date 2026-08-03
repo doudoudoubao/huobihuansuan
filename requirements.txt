@@ -1,0 +1,11 @@
+# 核心运行依赖
+aiogram>=3.13,<4
+aiohttp>=3.9
+aiosqlite>=0.20
+
+# 走势图（可选）：不装也能跑，/chart 会退化成文字迷你走势
+matplotlib>=3.7
+
+# 开发/测试
+pytest>=8.0
+pytest-asyncio>=0.23
