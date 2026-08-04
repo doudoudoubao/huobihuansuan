@@ -151,6 +151,34 @@ class HttpClient:
                     await asyncio.sleep(0.4 * (attempt + 1))
         raise ProviderError(str(last_exc) if last_exc else f"{_host(url)} 请求失败")
 
+    async def get_text(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        retries: int = 1,
+        headers: dict[str, str] | None = None,
+        tolerate_error: bool = False,
+    ) -> str:
+        """拉纯文本。CSV 接口用，也用于「只为拿 cookie」的请求
+        （那种请求本身可能返回 404，用 tolerate_error 放行）。
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(retries + 1):
+            try:
+                session = await self.session()
+                async with session.get(url, params=params, headers=headers) as resp:
+                    if resp.status == 429:
+                        raise ProviderError(f"{_host(url)} 请求过频被限流 (429)")
+                    if resp.status >= 400 and not tolerate_error:
+                        raise ProviderError(f"{_host(url)} 返回 HTTP {resp.status}")
+                    return await resp.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError, ProviderError) as exc:
+                last_exc = exc
+                if attempt < retries:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+        raise ProviderError(str(last_exc) if last_exc else f"{_host(url)} 请求失败")
+
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()

@@ -313,3 +313,133 @@ async def test_stale_cache_entries_are_dropped():
     provider._cache["CNY"] = (Decimal("7.2"), _t.time() - YahooFinanceProvider.CACHE_TTL - 10)
     quotes, _ = provider._from_cache(["CNY"])
     assert "CNY" not in quotes                  # 过期就别再拿出来充数
+
+
+# --- Stooq：一次请求拿一批，天然不撞限流 --------------------------------------
+
+
+class TextHttp(HttpClient):
+    """返回预置文本的假客户端，记录每次请求的参数。"""
+
+    def __init__(self, body: str = "") -> None:
+        super().__init__()
+        self.body = body
+        self.calls: list[dict] = []
+
+    async def get_text(self, url, *, params=None, retries=1, headers=None, tolerate_error=False):  # type: ignore[override]
+        self.calls.append({"url": url, "params": params or {}})
+        return self.body
+
+
+STOOQ_CSV = """Symbol,Date,Time,Open,High,Low,Close,Volume
+USDCNY,2026-08-04,15:30:00,7.2400,7.2450,7.2380,7.2431,0
+USDJPY,2026-08-04,15:30:00,157.10,157.40,157.00,157.3200,0
+EURUSD,2026-08-04,15:30:00,1.0890,1.0902,1.0880,1.0851,0
+USDXXX,N/D,N/D,N/D,N/D,N/D,N/D,N/D
+"""
+
+
+async def test_stooq_parses_close_column():
+    from bot.rates.providers import StooqProvider
+
+    http = TextHttp(STOOQ_CSV)
+    result = await StooqProvider(http).fetch(wanted=["CNY", "JPY", "EUR"])
+    assert result.quotes["CNY"] == Decimal("7.2431")
+    assert result.quotes["JPY"] == Decimal("157.3200")
+    assert result.quotes["USD"] == Decimal(1)
+
+
+async def test_stooq_inverts_majors_quoted_against_usd():
+    """EURUSD 报的是 1 EUR = N USD，要倒过来才是「1 USD 换多少欧元」。"""
+    from bot.rates.providers import StooqProvider
+
+    http = TextHttp(STOOQ_CSV)
+    result = await StooqProvider(http).fetch(wanted=["EUR"])
+    assert result.quotes["EUR"] == Decimal(1) / Decimal("1.0851")
+    assert StooqProvider.symbol_for("EUR") == ("eurusd", True)
+    assert StooqProvider.symbol_for("CNY") == ("usdcny", False)
+
+
+async def test_stooq_skips_unavailable_rows():
+    from bot.rates.providers import StooqProvider
+
+    http = TextHttp(STOOQ_CSV)
+    result = await StooqProvider(http).fetch(wanted=["CNY"])
+    assert "XXX" not in result.quotes     # N/D 的行直接跳过
+
+
+async def test_stooq_batches_many_pairs_into_few_requests():
+    """一次请求拿一批，正是它比 Yahoo 抗限流的原因。"""
+    from bot.rates.providers import StooqProvider
+
+    http = TextHttp(STOOQ_CSV)
+    await StooqProvider(http).fetch()
+    # 二十多个货币，请求数应该是个位数，而不是每个符号一次
+    assert len(http.calls) <= 3
+    assert "+" in http.calls[0]["params"]["s"]
+
+
+async def test_stooq_raises_when_nothing_parses():
+    from bot.rates.providers import StooqProvider
+
+    with pytest.raises(ProviderError, match="stooq"):
+        await StooqProvider(TextHttp("Symbol,Date,Time,Open,High,Low,Close,Volume\n")).fetch()
+
+
+# --- Yahoo 的访问凭证 ---------------------------------------------------------
+
+
+class CrumbHttp(CountingHttp):
+    """在 CountingHttp 基础上支持 get_text，用来发 cookie 和 crumb。"""
+
+    def __init__(self, crumb: str = "AbCd1234", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.crumb = crumb
+        self.text_calls: list[str] = []
+
+    async def get_text(self, url, *, params=None, retries=1, headers=None, tolerate_error=False):  # type: ignore[override]
+        self.text_calls.append(url)
+        return "" if "fc.yahoo.com" in url else self.crumb
+
+
+async def test_yahoo_fetches_and_uses_a_crumb():
+    """Yahoo 对没有会话凭证的请求一律回 429，跟频率无关，所以必须先拿 crumb。"""
+    http = CrumbHttp()
+    provider = YahooFinanceProvider(http, hot_set=["CNY"])
+    await provider.fetch()
+    assert any("fc.yahoo.com" in url for url in http.text_calls)
+    assert any("getcrumb" in url for url in http.text_calls)
+    assert provider._crumb == "AbCd1234"
+
+
+async def test_yahoo_reuses_the_crumb_across_cycles():
+    http = CrumbHttp()
+    provider = YahooFinanceProvider(http, hot_set=["CNY", "JPY"])
+    await provider.fetch()
+    calls_after_first = len(http.text_calls)
+    await provider.fetch()
+    assert len(http.text_calls) == calls_after_first   # 没有重复申请
+
+
+async def test_yahoo_drops_the_crumb_after_a_rate_limit():
+    """被限流多半是凭证失效，下一轮要重新申请而不是继续用旧的。"""
+    http = CrumbHttp()
+    provider = YahooFinanceProvider(http, hot_set=["CNY"])
+    await provider.fetch()
+    assert provider._crumb
+
+    http.fail_after = 0
+    await provider.fetch()
+    assert provider._crumb == ""
+
+
+async def test_yahoo_survives_a_failed_crumb_fetch():
+    """拿不到凭证也别拖垮整个源——裸奔请求，成不成看运气。"""
+    class NoCrumbHttp(CrumbHttp):
+        async def get_text(self, url, **kwargs):  # type: ignore[override]
+            raise ProviderError("getcrumb 挂了")
+
+    provider = YahooFinanceProvider(NoCrumbHttp(), hot_set=["CNY"])
+    result = await provider.fetch()
+    assert result.quotes["CNY"] == Decimal("7.2")
+    assert provider._crumb == ""

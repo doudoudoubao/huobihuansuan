@@ -3,8 +3,8 @@
 全部统一输出「1 USD = X 单位目标货币」的映射，方便服务层合并。
 优先级（priority 越小越先采用）：
 
-    法币  Yahoo(准实时) 10  →  Frankfurter/ECB 30  →  open.er-api 40  →  currency-api 50
-    加密  Binance 10       →  OKX 20             →  CoinGecko 40     →  currency-api 50
+    法币  Yahoo 10 → Stooq 15（均准实时）→ Frankfurter/ECB 30 → open.er-api 40 → currency-api 50
+    加密  Binance 10 → OKX 20（均准实时）→ CoinGecko 40 → currency-api 50
 """
 
 from __future__ import annotations
@@ -174,6 +174,88 @@ class CurrencyApiProvider(RateProvider):
         return series
 
 
+class StooqProvider(RateProvider):
+    """Stooq 的 CSV 行情：免费、免鉴权，而且**一次请求能拿一批货币对**。
+
+    这一点很关键 —— Yahoo 每个符号都要单独发一次请求，很容易被反爬判成
+    高频访问；Stooq 一次 20 对只发一个请求，天然不会撞限流。
+    """
+
+    name = "stooq"
+    kind = "fiat"
+    cadence = "realtime"
+    priority = 15  # 仅次于 Yahoo，排在每日源前面
+    supports_history = False
+
+    URL = "https://stooq.com/q/l/"
+    CHUNK = 20
+
+    #: 外汇市场习惯用 XXX/USD 报价的货币，取到的价要倒过来用
+    INVERTED = frozenset({"EUR", "GBP", "AUD", "NZD"})
+
+    @classmethod
+    def symbol_for(cls, code: str) -> tuple[str, bool]:
+        """返回 (stooq 符号, 是否需要取倒数)。"""
+        lower = code.lower()
+        if code in cls.INVERTED:
+            return f"{lower}usd", True
+        return f"usd{lower}", False
+
+    async def fetch(self, wanted: Iterable[str] | None = None) -> ProviderResult:
+        codes = sorted(
+            c
+            for c in {x.upper() for x in (wanted or ())} | set(cur_mod.FILLER) | set(cur_mod.POPULAR)
+            if c in cur_mod.FIAT_CODES and c != "USD"
+        )
+        quotes: dict[str, Decimal] = {"USD": Decimal(1)}
+        errors: list[str] = []
+
+        for start in range(0, len(codes), self.CHUNK):
+            chunk = codes[start : start + self.CHUNK]
+            symbols = {}
+            for code in chunk:
+                symbol, invert = self.symbol_for(code)
+                symbols[symbol] = (code, invert)
+            try:
+                text = await self.http.get_text(
+                    self.URL,
+                    params={"s": "+".join(symbols), "f": "sd2t2ohlcv", "h": "", "e": "csv"},
+                    retries=1,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+                continue
+            quotes.update(self._parse_csv(text, symbols))
+            if start + self.CHUNK < len(codes):
+                await asyncio.sleep(0.5)  # 两批之间喘口气
+
+        # 部分成功也算数：拿到几个用几个，缺的货币会自然落到下一优先级的源
+        if len(quotes) < 2:
+            raise ProviderError(f"stooq 无可用报价{'：' + errors[0] if errors else ''}")
+        return ProviderResult(self.name, quotes, note="realtime")
+
+    @staticmethod
+    def _parse_csv(text: str, symbols: dict[str, tuple[str, bool]]) -> dict[str, Decimal]:
+        """CSV 形如 `Symbol,Date,Time,Open,High,Low,Close,Volume`，取 Close 列。
+
+        拿不到行情的符号各列会是 N/D，跳过即可。
+        """
+        out: dict[str, Decimal] = {}
+        for line in text.strip().splitlines()[1:]:  # 第一行是表头
+            fields = [f.strip() for f in line.split(",")]
+            if len(fields) < 7:
+                continue
+            entry = symbols.get(fields[0].lower())
+            if entry is None:
+                continue
+            code, invert = entry
+            close = to_decimal(fields[6])
+            if close is None:  # N/D 或异常值
+                continue
+            out[code] = (Decimal(1) / close) if invert else close
+        return out
+
+
 class YahooFinanceProvider(RateProvider):
     """Yahoo Finance 图表接口：分钟级的准实时报价，也提供历史序列。
 
@@ -205,8 +287,9 @@ class YahooFinanceProvider(RateProvider):
     BATCH = 6              # 每轮最多刷新几个
     CONCURRENCY = 2        # 同时在飞的请求数
     SPACING = 0.35         # 每个请求起步之间的最小间隔（秒）
-    COOLDOWN_ON_429 = 300  # 被限流后歇多久再试
+    COOLDOWN_ON_429 = 600  # 被限流后歇多久再试
     CACHE_TTL = 900        # 缓存里的报价超过这么久就不再拿出来用
+    CRUMB_TTL = 3600       # 访问凭证的有效期
 
     def __init__(self, http, hot_set: Iterable[str] | None = None) -> None:  # noqa: ANN001
         super().__init__(http)
@@ -215,6 +298,8 @@ class YahooFinanceProvider(RateProvider):
         self._cache: dict[str, tuple[Decimal, float]] = {}
         self._cooldown_until = 0.0
         self._rotation = 0
+        self._crumb: str = ""
+        self._crumb_at = 0.0
 
     def set_hot(self, codes: Iterable[str]) -> None:
         """由服务层告知“最近有人用”的货币，动态调整拉取范围。"""
@@ -229,13 +314,42 @@ class YahooFinanceProvider(RateProvider):
             return f"{code}-USD"
         return f"{code}=X"  # 隐含以 USD 为基准
 
+    async def _ensure_crumb(self) -> str:
+        """拿 cookie + crumb。
+
+        Yahoo 现在对没有会话凭证的请求一律回 429——**跟你发得多快无关**，
+        它就是这么打发爬虫的。所以先访问一次拿 cookie，再换一个 crumb，
+        之后每个请求都带上。拿不到就退化成不带 crumb 直接请求（可能被拒，
+        但不至于让整个 provider 崩掉）。
+        """
+        if self._crumb and time.time() - self._crumb_at < self.CRUMB_TTL:
+            return self._crumb
+        try:
+            # 这个地址会返回 404，但会顺带下发所需的 cookie
+            await self.http.get_text("https://fc.yahoo.com", retries=0, tolerate_error=True)
+            crumb = (
+                await self.http.get_text(
+                    "https://query1.finance.yahoo.com/v1/test/getcrumb", retries=0
+                )
+            ).strip()
+            if crumb and len(crumb) < 32 and "<" not in crumb:
+                self._crumb = crumb
+                self._crumb_at = time.time()
+                log.info("yahoo 已获取访问凭证")
+        except Exception as exc:  # noqa: BLE001 - 拿不到就裸奔，别拖垮整个源
+            log.debug("yahoo 获取 crumb 失败: %s", exc)
+        return self._crumb
+
     async def _quote(self, code: str, host_index: int) -> tuple[str, Decimal] | None:
         """抓一个符号。只发一次请求——失败就等下一轮，别原地重试加剧限流。"""
         symbol = self.symbol_for(code)
         if not symbol:
             return code, Decimal(1)
         url = self.HOSTS[host_index % len(self.HOSTS)].format(symbol=symbol)
-        data = await self.http.get_json(url, params={"range": "1d", "interval": "5m"}, retries=0)
+        params: dict[str, Any] = {"range": "1d", "interval": "5m"}
+        if self._crumb:
+            params["crumb"] = self._crumb
+        data = await self.http.get_json(url, params=params, retries=0)
         meta = (((data.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
         price = to_decimal(meta.get("regularMarketPrice"))
         if price is None:
@@ -271,6 +385,7 @@ class YahooFinanceProvider(RateProvider):
                 )
             return ProviderResult(self.name, quotes, as_of=oldest, note="cached")
 
+        await self._ensure_crumb()
         sem = asyncio.Semaphore(self.CONCURRENCY)
         due = self._due_for_refresh(targets)
         throttled = False
@@ -302,7 +417,8 @@ class YahooFinanceProvider(RateProvider):
 
         if throttled:
             self._cooldown_until = fetched_now + self.COOLDOWN_ON_429
-            log.warning("yahoo 被限流，冷却 %ds 后再试", self.COOLDOWN_ON_429)
+            self._crumb = ""  # 多半是凭证失效了，下一轮重新申请
+            log.warning("yahoo 被限流，冷却 %ds 后重新取凭证再试", self.COOLDOWN_ON_429)
 
         quotes, oldest = self._from_cache(targets)
         if len(quotes) < 2:
@@ -516,6 +632,7 @@ def _parse_date_ts(value: Any) -> float:
 
 ALL_PROVIDER_CLASSES: tuple[type[RateProvider], ...] = (
     YahooFinanceProvider,
+    StooqProvider,
     BinanceProvider,
     OkxProvider,
     FrankfurterProvider,
