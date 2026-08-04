@@ -465,6 +465,7 @@ git pull && pip install -r requirements.txt && sudo systemctl restart huobihuans
 | `@bot ...` 没结果 | BotFather 里没开 `/setinline` |
 | 页脚写「🗓 每日更新 · 昨日报价」 | 正常。这一对走的是欧洲央行这类每日源，它一天只公布一次价。想要准实时得让 Yahoo 那条链通（`/status` 看它是不是红的） |
 | 页脚写「⚠️ 数据源连不上」 | 真出问题了：已经很久没成功刷新。发 `/status` 看哪个源挂了 |
+| 某个源一直连不上，想弄清为什么 | 跑 `python3 scripts/probe_sources.py`（Docker 下 `docker compose run --rm bot python scripts/probe_sources.py`），它会把各候选源在这台机器上的真实响应打出来 |
 | 自检里某个源 429 | 对方限流了。只要同类还有绿的就不用管，也可 `DISABLED_PROVIDERS=` 关掉它 |
 | 自检提示「只剩每日更新的源」 | 实时源都连不上（常见于出网受限的机器），换台境外机器最省事 |
 | `/chart` 没图只有字符 | 没装 matplotlib，`pip install matplotlib` 即可 |
