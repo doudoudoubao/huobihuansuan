@@ -1,4 +1,4 @@
-.PHONY: install run check test lint docker
+.PHONY: install run check test lint docker update
 
 install:
 	pip install -r requirements.txt
@@ -17,3 +17,6 @@ lint:
 
 docker:
 	docker compose up -d --build
+
+update:
+	./update.sh

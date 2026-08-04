@@ -13,3 +13,4 @@ rates_cache.json
 .ruff_cache/
 *.egg-info/
 .DS_Store
+.update-previous
