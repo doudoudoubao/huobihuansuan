@@ -94,10 +94,12 @@ def _kill(rows, *names, error="连接超时"):
 def test_everything_healthy():
     from bot.main import diagnose_providers
 
-    lines, all_ok, degraded = diagnose_providers(_all_up())
-    assert all_ok and not degraded
-    assert any("法币主力 yahoo，准实时" in line for line in lines)
-    assert any("加密主力 binance，准实时" in line for line in lines)
+    d = diagnose_providers(_all_up())
+    assert d.all_kinds_ok and not d.degraded
+    assert all(status == "ok" for status, _, _ in d.items)
+    assert [status for status, _ in d.verdicts] == ["ok", "ok"]
+    assert any("法币 → yahoo" in text for _, text in d.verdicts)
+    assert any("加密 → binance" in text for _, text in d.verdicts)
 
 
 def test_rate_limited_backup_is_only_a_warning():
@@ -105,43 +107,43 @@ def test_rate_limited_backup_is_only_a_warning():
     from bot.main import diagnose_providers
 
     rows = _kill(_all_up(), "coingecko", error="api.coingecko.com 请求过频被限流 (429)")
-    lines, all_ok, degraded = diagnose_providers(rows)
-    assert all_ok and not degraded
-    assert any("🟡 coingecko" in line and "有其他源顶着" in line for line in lines)
-    assert any("加密主力 binance" in line for line in lines)
+    d = diagnose_providers(rows)
+    assert d.all_kinds_ok and not d.degraded
+    status, name, detail = next(item for item in d.items if item[1] == "coingecko")
+    assert status == "warn" and "忽略即可" in detail
+    assert any("加密 → binance" in text for _, text in d.verdicts)
 
 
 def test_promotes_next_provider_when_primary_dies():
     from bot.main import diagnose_providers
 
-    lines, all_ok, degraded = diagnose_providers(_kill(_all_up(), "binance"))
-    assert all_ok and not degraded
+    d = diagnose_providers(_kill(_all_up(), "binance"))
+    assert d.all_kinds_ok and not d.degraded
     # yahoo 也是 mixed，会接手加密
-    assert any("加密主力 yahoo" in line for line in lines)
+    assert any("加密 → yahoo" in text for _, text in d.verdicts)
 
 
 def test_only_daily_sources_left_is_degraded():
-    """还能跑，但「实时」没了——必须说出来，不能报「全部通过」。"""
+    """还能跑，但「实时」没了——必须说出来，不能报「一切正常」。"""
     from bot.main import diagnose_providers
 
-    rows = _kill(_all_up(), "yahoo", "binance", "okx", "coingecko")
-    lines, all_ok, degraded = diagnose_providers(rows)
-    assert all_ok is True      # 两类都还有源
-    assert degraded is True    # 但只剩每日更新的
-    assert any("法币只剩每日更新的 frankfurter" in line for line in lines)
-    assert any("加密只剩每日更新的 currency-api" in line for line in lines)
+    d = diagnose_providers(_kill(_all_up(), "yahoo", "binance", "okx", "coingecko"))
+    assert d.all_kinds_ok is True    # 两类都还有源
+    assert d.degraded is True        # 但只剩每日更新的
+    assert [status for status, _ in d.verdicts] == ["warn", "warn"]
+    assert any("只剩每日更新的源" in text for _, text in d.verdicts)
 
 
 def test_whole_category_down_is_fatal():
     from bot.main import diagnose_providers
 
     rows = _kill(_all_up(), "yahoo", "binance", "okx", "coingecko", "currency-api")
-    lines, all_ok, degraded = diagnose_providers(rows)
-    assert all_ok is False and degraded is True
-    assert any("加密报价无源可用" in line for line in lines)
-    # 法币还活着，所以法币那几个不该被标成「没有源能接替」
-    assert any("🟢 frankfurter" in line for line in lines)
-    assert any("🔴 binance" in line and "没有源能接替" in line for line in lines)
+    d = diagnose_providers(rows)
+    assert d.all_kinds_ok is False and d.degraded is True
+    assert any(status == "fail" and "加密 无源可用" in text for status, text in d.verdicts)
+    # 法币还活着，所以法币那几个不该被标成 fail
+    assert next(i for i in d.items if i[1] == "frankfurter")[0] == "ok"
+    assert next(i for i in d.items if i[1] == "binance")[0] == "fail"
 
 
 def test_error_text_is_shortened():

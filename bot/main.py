@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -20,6 +21,7 @@ from aiogram.types import (
 )
 
 from .config import Config, StartupError, config as default_config
+from .console import Report
 from .db import Database
 from .handlers import build_router
 from .middlewares import PrefsMiddleware, ThrottleMiddleware
@@ -214,21 +216,24 @@ async def _run_webhook(bot: Bot, dp: Dispatcher, cfg: Config) -> None:
 async def self_check(cfg: Config | None = None) -> int:
     """`python run.py --check`：部署前把配置、Telegram 连通性、汇率源过一遍。"""
     cfg = cfg or default_config
-    print("🩺 部署自检\n" + "─" * 46)
+    report = Report("部署自检 · 货币换算 Bot")
 
     try:
         cfg.validate()
     except StartupError as exc:
-        print(f"❌ 配置\n   {str(exc).replace(chr(10), chr(10) + '   ')}")
+        report.line("fail", "配置", "有问题")
+        report.detail(exc)
+        report.close("fail", "起不来，先修上面这条")
         return 1
-    print(f"✅ 配置　　　token 格式正确，数据目录 {Path(cfg.db_path).parent}")
+    report.line("ok", "配置", f"token 正常 · 数据目录 {Path(cfg.db_path).parent}")
 
     db = Database(cfg)
     try:
         await db.connect()
-        print(f"✅ 数据库　　{cfg.db_path} 可读写")
+        report.line("ok", "数据库", f"{cfg.db_path} 可读写")
     except Exception as exc:  # noqa: BLE001
-        print(f"❌ 数据库　　{exc}")
+        report.line("fail", "数据库", str(exc))
+        report.close("fail", "起不来，检查目录权限和磁盘空间")
         return 1
     finally:
         await db.close()
@@ -236,14 +241,18 @@ async def self_check(cfg: Config | None = None) -> int:
     try:
         bot = build_bot(cfg)
     except StartupError as exc:
-        print(f"❌ 代理\n   {str(exc).replace(chr(10), chr(10) + '   ')}")
+        report.line("fail", "代理", "配置有问题")
+        report.detail(exc)
+        report.close("fail", "起不来，先修上面这条")
         return 1
     try:
         me = await _login(bot, cfg)
-        proxy = f"（经代理 {cfg.telegram_proxy}）" if cfg.telegram_proxy else ""
-        print(f"✅ Telegram　已登录 @{me.username}{proxy}")
+        via = f" · 经代理 {cfg.telegram_proxy}" if cfg.telegram_proxy else ""
+        report.line("ok", "Telegram", f"已登录 @{me.username}{via}")
     except StartupError as exc:
-        print(f"❌ Telegram\n   {str(exc).replace(chr(10), chr(10) + '   ')}")
+        report.line("fail", "Telegram", "连不上")
+        report.detail(exc)
+        report.close("fail", "起不来，先修上面这条")
         return 1
     finally:
         await bot.session.close()
@@ -255,29 +264,36 @@ async def self_check(cfg: Config | None = None) -> int:
         rows = rates.status()
         live = [row for row in rows if row["currencies"]]
         if not live:
-            print("❌ 汇率源　　一个都没连上，检查服务器能不能出网，或用 DISABLED_PROVIDERS 排除")
+            report.line("fail", "汇率源", "一个都没连上")
+            report.detail("检查服务器能不能出网，或用 DISABLED_PROVIDERS 排除个别源")
+            report.close("fail", "起不来，没有任何汇率数据")
             return 1
 
-        lines, all_kinds_ok, kinds_degraded = diagnose_providers(rows)
-        degraded = degraded or kinds_degraded
-        print(f"{'✅' if all_kinds_ok else '❌'} 汇率源　　{len(live)}/{len(rows)} 个在线")
-        for line in lines:
-            print(f"     {line}")
+        diagnosis = diagnose_providers(rows)
+        degraded = degraded or diagnosis.degraded
+        report.line(
+            "ok" if diagnosis.all_kinds_ok else "fail", "汇率源", f"{len(live)}/{len(rows)} 在线"
+        )
+        for status, name, detail in diagnosis.items:
+            report.item(status, name, detail)
+        for status, text in diagnosis.verdicts:
+            report.verdict(status, text)
 
         try:
             rate = rates.get_rate("USD", "CNY")
-            print(f"✅ 试算　　　1 USD = {rate.value:.4f} CNY（来自 {'/'.join(rate.sources)}）")
+            report.line(
+                "ok", "试算", f"1 USD = {rate.value:.4f} CNY   ({'/'.join(rate.sources)})"
+            )
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️  试算　　　USD/CNY 拿不到：{exc}")
+            report.line("warn", "试算", f"USD/CNY 拿不到：{exc}")
             degraded = True
     finally:
         await rates.http.close()
 
-    print("─" * 46)
     if degraded:
-        print("⚠️  能跑，但有数据源缺口，建议照上面的提示处理后再上线。")
+        report.close("warn", "能跑，但有数据源缺口，建议照上面的提示处理后再上线")
         return 2
-    print("全部通过，可以 python run.py 正式启动了。")
+    report.close("ok", "一切正常，可以 python run.py 启动了")
     return 0
 
 
@@ -291,10 +307,18 @@ def _short_error(error: str) -> str:
 REALTIME_PRIORITY = 20
 
 
-def diagnose_providers(rows: list[dict[str, object]]) -> tuple[list[str], bool, bool]:
-    """把 `RateService.status()` 翻成人能看懂的诊断。
+@dataclass(slots=True)
+class ProviderDiagnosis:
+    """数据源体检结果。渲染交给调用方，这里只出结论。"""
 
-    返回 (待打印的行, 两类报价是否都有源, 是否处于降级状态)。
+    items: list[tuple[str, str, str]]     # 逐个数据源：(状态, 名字, 说明)
+    verdicts: list[tuple[str, str]]       # 按类别的结论：(状态, 一句话)
+    all_kinds_ok: bool                    # 法币和加密是否都还有源
+    degraded: bool                        # 能跑但达不到预期
+
+
+def diagnose_providers(rows: list[dict[str, object]]) -> ProviderDiagnosis:
+    """把 `RateService.status()` 翻成人能看懂的诊断。
 
     判断的关键不是「几个源活着」，而是法币和加密**各自**还有没有人供数、
     以及顶上来的是不是准实时源 —— 只剩每日更新的兜底源时，
@@ -307,15 +331,17 @@ def diagnose_providers(rows: list[dict[str, object]]) -> tuple[list[str], bool, 
     exact_kind = {"法币": "fiat", "加密": "crypto"}
     healthy = {label for label, group in categories.items() if any(r["currencies"] for r in group)}
 
-    lines: list[str] = []
+    items: list[tuple[str, str, str]] = []
     for row in rows:
+        name = str(row["name"])
         if row["currencies"]:
-            lines.append(f"🟢 {str(row['name']):<13} {row['currencies']:>4} 种货币")
+            items.append(("ok", name, f"{row['currencies']:>4} 种货币"))
             continue
         covered = all(label in healthy for label, group in categories.items() if row in group)
-        mark, tail = ("🟡", "（有其他源顶着）") if covered else ("🔴", "（没有源能接替）")
-        lines.append(f"{mark} {str(row['name']):<13} {_short_error(str(row['error']))}{tail}")
+        tail = "（有备用顶着，忽略即可）" if covered else "（没有源能接替）"
+        items.append(("warn" if covered else "fail", name, _short_error(str(row["error"])) + tail))
 
+    verdicts: list[tuple[str, str]] = []
     degraded = False
     for label, group in categories.items():
         # 同优先级时，专职源（binance 之于加密）优于通吃源（yahoo），后者覆盖面更窄
@@ -325,19 +351,19 @@ def diagnose_providers(rows: list[dict[str, object]]) -> tuple[list[str], bool, 
         )
         if not alive:
             names = " / ".join(str(r["name"]) for r in group)
-            lines.append(f"⛔ {label}报价无源可用：{names} 全挂了，这类换算会直接失败")
+            verdicts.append(("fail", f"{label} 无源可用：{names} 全挂了，这类换算会直接失败"))
             degraded = True
             continue
-        best = alive[0]
-        if int(best["priority"]) <= REALTIME_PRIORITY:
-            lines.append(f"✅ {label}主力 {best['name']}，准实时（还有 {len(alive) - 1} 个备用）")
+        best = str(alive[0]["name"])
+        if int(alive[0]["priority"]) <= REALTIME_PRIORITY:
+            verdicts.append(("ok", f"{label} → {best}  准实时，另有 {len(alive) - 1} 个备用"))
         else:
-            lines.append(
-                f"⚠️  {label}只剩每日更新的 {best['name']}，汇率一天才变一次，实时性达不到预期"
+            verdicts.append(
+                ("warn", f"{label} → {best}  只剩每日更新的源，汇率一天才变一次")
             )
             degraded = True
 
-    return lines, len(healthy) == 2, degraded
+    return ProviderDiagnosis(items, verdicts, len(healthy) == 2, degraded)
 
 
 def main(argv: list[str] | None = None) -> None:

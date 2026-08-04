@@ -80,7 +80,8 @@ def fmt_rate(value: Decimal, prefs: UserPrefs | None = None) -> str:
     elif magnitude >= 1:
         decimals = 4
     else:
-        decimals = min(MAX_DECIMALS, 5 - magnitude.adjusted())
+        # 小数保留约 4 位有效数字：0.00000208474 → 0.000002085
+        decimals = min(MAX_DECIMALS, 3 - magnitude.adjusted())
     return fmt_number(value, decimals=decimals, group=group, min_decimals=2)
 
 
@@ -125,6 +126,16 @@ def expression_hint(expression: str | None) -> str:
 # --- 消息渲染 ---------------------------------------------------------------
 
 
+RULE = "───────────────"
+
+
+def fmt_input_amount(value: Decimal, code: str, prefs: UserPrefs) -> str:
+    """回显用户输入的金额：整数就别拖着 `.00` 的尾巴。"""
+    currency = cur_mod.get(code)
+    decimals = auto_decimals(value, prefs.decimals, currency)
+    return fmt_number(value, decimals=decimals, group=prefs.group_sep, min_decimals=0)
+
+
 def render_conversion(
     conv: Conversion,
     prefs: UserPrefs,
@@ -132,53 +143,43 @@ def render_conversion(
     change_24h: Decimal | None = None,
     expression: str | None = None,
 ) -> str:
+    """单对详情卡：源金额不加粗、结果加粗，视线一落就看到答案。"""
     lang = prefs.lang
     base = cur_mod.get(conv.base)
     quote = cur_mod.get(conv.quote)
-    amount_text = fmt_money(conv.amount, conv.base, prefs)
 
-    head = f"{base.flag} <b>{esc(amount_text)} {esc(conv.base)}</b>" + expression_hint(expression)
-    head += "\n= "
-    head += f"{quote.flag} <b>{esc(fmt_money(conv.result, conv.quote, prefs))} {esc(conv.quote)}</b>"
+    amount_text = fmt_input_amount(conv.amount, conv.base, prefs)
+    result_text = fmt_money(conv.result, conv.quote, prefs)
 
-    lines = [head, ""]
-    lines.append(
-        esc(
-            t(
-                lang,
-                "rate_line",
-                base=conv.base,
-                rate=fmt_rate(conv.rate.value, prefs),
-                quote=conv.quote,
-            )
-        )
-    )
-    lines.append(
-        f"<i>{esc(t(lang, 'inverse_line', base=conv.base, rate=fmt_rate(conv.rate.inverse, prefs), quote=conv.quote))}</i>"
-    )
+    lines = [
+        f"{base.flag} {esc(amount_text)} {esc(conv.base)}" + expression_hint(expression),
+        f"{quote.flag} <b>{esc(result_text)} {esc(conv.quote)}</b>",
+        "",
+    ]
 
     if conv.fee_percent:
-        fee_abs = abs(conv.fee_amount)
-        key = "fee_line" if conv.fee_percent > 0 else "fee_line_bonus"
+        gross = fmt_money(conv.gross, conv.quote, prefs)
+        sign = "−" if conv.fee_percent > 0 else "+"
+        pct = fmt_number(abs(conv.fee_percent), decimals=2, group=False)
+        word = "手续费" if lang == "zh" else "fee"
         lines.append(
-            esc(
-                t(
-                    lang,
-                    key,
-                    fee=fmt_number(abs(conv.fee_percent), decimals=2, group=False),
-                    amount=fmt_money(fee_abs, conv.quote, prefs),
-                    quote=conv.quote,
-                )
-            )
+            f"<i>{esc(gross)} {esc(conv.quote)} · {esc(word)} {sign}{esc(pct)}% "
+            f"= {esc(fmt_money(abs(conv.fee_amount), conv.quote, prefs))}</i>"
         )
+
+    lines.append(esc(f"1 {conv.base} = {fmt_rate(conv.rate.value, prefs)} {conv.quote}"))
+    lines.append(
+        f"<i>{esc(f'1 {conv.quote} = {fmt_rate(conv.rate.inverse, prefs)} {conv.base}')}</i>"
+    )
 
     if prefs.show_change:
         change = fmt_change(change_24h, lang)
         if change:
             lines.append(esc(change))
 
+    lines.append(RULE)
     lines.append(_footer(conv.rate, prefs))
-    return "\n".join(line for line in lines if line is not None)
+    return "\n".join(lines)
 
 
 def render_multi(
@@ -191,33 +192,42 @@ def render_multi(
     fee_percent: Decimal | None = None,
     expression: str | None = None,
 ) -> str:
+    """多币种速览。
+
+    对齐的关键：货币代码和数值必须在**同一个** <code> 里，
+    Telegram 才会用等宽字体渲染整段、右对齐才立得住。
+    国旗 emoji 留在 code 外面，每行都有且只有一个，起点自然齐平。
+    """
     lang = prefs.lang
     base_meta = cur_mod.get(base)
-    amount_text = fmt_money(amount, base, prefs)
-    head = f"{base_meta.flag} <b>{esc(amount_text)} {esc(base)}</b>" + expression_hint(expression)
+    amount_text = fmt_input_amount(amount, base, prefs)
 
-    lines = [head, ""]
-    width = max((len(conv.quote) for conv in conversions), default=3)
-    for conv in conversions:
+    icon = base_meta.flag or "💱"
+    lines = [f"{icon} <b>{esc(amount_text)} {esc(base)}</b>" + expression_hint(expression), ""]
+
+    values = [fmt_money(conv.result, conv.quote, prefs) for conv in conversions]
+    value_width = max((len(v) for v in values), default=0)
+    code_width = max((len(conv.quote) for conv in conversions), default=3)
+
+    for conv, value in zip(conversions, values):
         quote_meta = cur_mod.get(conv.quote)
-        flag = quote_meta.flag or "　"
-        value = fmt_money(conv.result, conv.quote, prefs)
-        lines.append(f"{flag} <code>{esc(conv.quote.ljust(width))}</code>  <b>{esc(value)}</b>")
+        flag = quote_meta.flag or "▫️"
+        cell = f"{conv.quote.ljust(code_width)}  {value.rjust(value_width)}"
+        lines.append(f"{flag} <code>{esc(cell)}</code>")
 
     missing_list = [code for code in missing]
     if missing_list:
         joiner, suffix = ("、", " 暂无报价") if lang == "zh" else (", ", " unavailable")
-        lines.append("")
         lines.append(f"<i>⚠️ {esc(joiner.join(missing_list))}{esc(suffix)}</i>")
 
     if fee_percent:
-        sign = "-" if fee_percent > 0 else "+"
+        sign = "−" if fee_percent > 0 else "+"
         pct = fmt_number(abs(fee_percent), decimals=2, group=False)
-        lines.append("")
-        lines.append(f"<i>{esc('已计手续费' if lang == 'zh' else 'fee applied')} {sign}{esc(pct)}%</i>")
+        word = "已扣手续费" if lang == "zh" else "fee applied"
+        lines.append(f"<i>{esc(word)} {sign}{esc(pct)}%</i>")
 
     if conversions:
-        lines.append("")
+        lines.append(RULE)
         lines.append(_footer(conversions[0].rate, prefs))
     return "\n".join(lines)
 
@@ -241,7 +251,7 @@ def render_rate(rate: RateInfo, prefs: UserPrefs, *, change_24h: Decimal | None 
     if changes:
         lines.append("")
         lines.append(esc(" · ".join(changes)))
-    lines.append("")
+    lines.append(RULE)
     lines.append(_footer(rate, prefs))
     return "\n".join(lines)
 
@@ -252,8 +262,8 @@ def _footer(rate: RateInfo, prefs: UserPrefs) -> str:
     if rate.stale:
         return f"<i>⚠️ {esc(t(lang, 'stale_warn', ago=ago))}</i>"
     if not prefs.show_source:
-        return f"<i>{esc(t(lang, 'updated_at', ago=ago))}</i>"
-    return f"<i>{esc(t(lang, 'source_line', sources='/'.join(rate.sources), ago=ago))}</i>"
+        return f"<i>🕒 {esc(ago)}</i>"
+    return f"<i>📡 {esc('/'.join(rate.sources))} · {esc(ago)}</i>"
 
 
 def render_currency_list(items: Sequence[cur_mod.Currency], lang: str, *, title: str) -> str:

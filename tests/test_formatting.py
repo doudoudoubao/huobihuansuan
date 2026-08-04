@@ -30,8 +30,22 @@ def test_small_amounts_get_more_precision(prefs):
 
 def test_rate_precision(prefs):
     assert fmt.fmt_rate(Decimal("7.24315"), prefs) == "7.2432"
-    assert fmt.fmt_rate(Decimal("0.0000208474"), prefs) == "0.0000208474"
     assert fmt.fmt_rate(Decimal("157321.5"), prefs) == "157,321.50"
+
+
+def test_tiny_rates_keep_four_significant_digits(prefs):
+    """0.00000208474 全写出来反而看不清，收敛到 ~4 位有效数字。"""
+    assert fmt.fmt_rate(Decimal("0.0000208474"), prefs) == "0.00002085"
+    assert fmt.fmt_rate(Decimal("0.00000208474"), prefs) == "0.000002085"
+    assert fmt.fmt_rate(Decimal("0.1380623"), prefs) == "0.1381"
+
+
+def test_input_amount_drops_trailing_zeros(prefs):
+    """回显用户输入的金额时，100 就是 100，不该显示成 100.00。"""
+    assert fmt.fmt_input_amount(Decimal(100), "CNY", prefs) == "100"
+    assert fmt.fmt_input_amount(Decimal("100.5"), "CNY", prefs) == "100.5"
+    assert fmt.fmt_input_amount(Decimal("35000"), "USD", prefs) == "35,000"
+    assert fmt.fmt_input_amount(Decimal("0.5"), "BTC", prefs) == "0.5"
 
 
 def test_expression_hint_only_for_real_math():

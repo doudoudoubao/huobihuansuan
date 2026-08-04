@@ -110,3 +110,57 @@ async def test_crypto_precision(prefs, rates):
 async def test_zero_decimal_currency(prefs, rates):
     rendered = await respond_to_text("100 usd jpy", prefs, rates)
     assert "15,700" in rendered.text
+
+
+# --- 排版 ---------------------------------------------------------------------
+
+
+def _code_cells(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"<code>(.*?)</code>", text)
+
+
+async def test_multi_list_columns_are_aligned(prefs, rates):
+    """对齐的前提：代码和数值必须在同一个 <code> 里，且每行等宽。
+
+    以前数值在 <code> 外面用 <b> 渲染（比例字体），列根本对不齐。
+    """
+    rendered = await respond_to_text("100", prefs, rates)
+    cells = _code_cells(rendered.text)
+    assert len(cells) >= 3
+    assert len({len(cell) for cell in cells}) == 1, cells  # 每行等宽
+    for cell in cells:
+        assert cell.endswith(cell.strip()[-1])   # 数值右对齐，右边没有多余空格
+        assert cell[:3].strip() == cell[:3]      # 代码左对齐
+
+
+async def test_multi_list_right_aligns_wide_numbers(prefs, rates):
+    rendered = await build_conversion(Decimal(35000), "USD", ["CNY", "JPY", "KRW"], prefs, rates)
+    cells = _code_cells(rendered.text)
+    assert len({len(cell) for cell in cells}) == 1
+    # 最长的那个数值应该顶到最右边，短的靠空格补齐
+    assert all(not cell.endswith(" ") for cell in cells)
+
+
+async def test_header_shows_plain_integer(prefs, rates):
+    rendered = await respond_to_text("100 usd cny", prefs, rates)
+    assert "100 USD" in rendered.text
+    assert "100.00 USD" not in rendered.text   # 输入是整数就别加 .00
+
+
+async def test_only_the_result_is_bold(prefs, rates):
+    """单对卡的视觉焦点只有一个：换算结果。"""
+    rendered = await respond_to_text("100 usd cny", prefs, rates)
+    import re
+
+    bolds = re.findall(r"<b>(.*?)</b>", rendered.text)
+    assert bolds == ["724.00 CNY"]
+
+
+async def test_card_has_a_footer_rule(prefs, rates):
+    from bot.formatting import RULE
+
+    rendered = await respond_to_text("100 usd cny", prefs, rates)
+    assert RULE in rendered.text
+    assert rendered.text.rstrip().endswith("</i>")   # 页脚是最后一行
