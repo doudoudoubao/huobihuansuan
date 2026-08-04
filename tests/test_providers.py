@@ -206,3 +206,110 @@ async def test_provider_backoff_grows():
     assert provider.healthy is False
     provider.mark_success()
     assert provider.healthy is True and provider.backoff_seconds == 0
+
+
+# --- Yahoo 的限速策略 ---------------------------------------------------------
+#
+# 线上实测：单发一次稳定 200，紧接着连发就吃 429。原来的实现 8 并发一次性
+# 拉 24 个符号、失败还换个 host 再打一遍，等于自己把自己打成限流，
+# 结果整个 provider 常年「无可用报价」。下面这组用例盯住修好的节奏。
+
+
+class CountingHttp(HttpClient):
+    """记录每次请求，可指定第 N 次之后开始返回 429。"""
+
+    def __init__(self, price: float = 7.2, fail_after: int | None = None) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+        self.price = price
+        self.fail_after = fail_after
+
+    async def get_json(self, url, *, params=None, retries=2, headers=None):  # type: ignore[override]
+        self.calls.append(url)
+        if self.fail_after is not None and len(self.calls) > self.fail_after:
+            raise ProviderError("query1.finance.yahoo.com 请求过频被限流 (429)")
+        return {"chart": {"result": [{"meta": {"regularMarketPrice": self.price}}]}}
+
+
+def _many_codes(n: int = 20) -> list[str]:
+    from bot import currencies as cur_mod
+
+    return [c for c in cur_mod.FILLER if c != "USD"][:n]
+
+
+async def test_only_a_batch_is_refreshed_per_cycle():
+    """一轮不该把所有符号都打一遍——那正是招来 429 的原因。"""
+    http = CountingHttp()
+    provider = YahooFinanceProvider(http, hot_set=_many_codes(20))
+    await provider.fetch()
+    assert len(http.calls) == YahooFinanceProvider.BATCH
+
+
+async def test_rotation_eventually_covers_everything():
+    http = CountingHttp()
+    codes = _many_codes(12)
+    provider = YahooFinanceProvider(http, hot_set=codes)
+    for _ in range(len(codes) // YahooFinanceProvider.BATCH + 1):
+        result = await provider.fetch()
+    assert set(codes) <= set(result.quotes)
+
+
+async def test_cache_keeps_partial_results_alive():
+    """第二轮只刷新另一批，上一批的报价必须还在结果里。"""
+    http = CountingHttp()
+    codes = _many_codes(12)
+    provider = YahooFinanceProvider(http, hot_set=codes)
+    first = await provider.fetch()
+    second = await provider.fetch()
+    assert set(first.quotes) - {"USD"} <= set(second.quotes)
+    assert len(second.quotes) > len(first.quotes)
+
+
+async def test_rate_limit_triggers_cooldown_and_stops_requesting():
+    http = CountingHttp(fail_after=0)          # 第一发就 429
+    provider = YahooFinanceProvider(http, hot_set=_many_codes(8))
+    with pytest.raises(ProviderError, match="429"):
+        await provider.fetch()                  # 没有缓存 → 如实报错
+    assert provider._cooldown_until > 0
+
+    calls_before = len(http.calls)
+    with pytest.raises(ProviderError, match="冷却"):
+        await provider.fetch()                  # 冷却期内一个请求都不该发
+    assert len(http.calls) == calls_before
+
+
+async def test_cooldown_serves_cache_instead_of_failing():
+    http = CountingHttp()
+    codes = _many_codes(6)
+    provider = YahooFinanceProvider(http, hot_set=codes)
+    await provider.fetch()                      # 先攒下缓存
+
+    http.fail_after = 0                         # 之后一律 429
+    await provider.fetch()
+    assert provider._cooldown_until > 0
+
+    calls_before = len(http.calls)
+    result = await provider.fetch()             # 冷却期：吃缓存，不发请求
+    assert len(http.calls) == calls_before
+    assert result.note == "cached"
+    assert set(codes) <= set(result.quotes)
+
+
+async def test_one_request_per_symbol_no_host_retry():
+    """失败不该立刻换 host 再打一遍——那会把请求量翻倍。"""
+    http = CountingHttp(fail_after=0)
+    provider = YahooFinanceProvider(http, hot_set=["CNY", "JPY"])
+    with pytest.raises(ProviderError):
+        await provider.fetch()
+    assert len(http.calls) == 2                 # 2 个符号 = 2 次请求，不是 4 次
+
+
+async def test_stale_cache_entries_are_dropped():
+    import time as _t
+
+    http = CountingHttp()
+    provider = YahooFinanceProvider(http, hot_set=["CNY"])
+    await provider.fetch()
+    provider._cache["CNY"] = (Decimal("7.2"), _t.time() - YahooFinanceProvider.CACHE_TTL - 10)
+    quotes, _ = provider._from_cache(["CNY"])
+    assert "CNY" not in quotes                  # 过期就别再拿出来充数

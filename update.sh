@@ -5,6 +5,7 @@
 #   ./update.sh              自动判断用的是 Docker 还是 venv
 #   ./update.sh --check-only 只拉代码和跑自检，不重启（想先看看再说）
 #   ./update.sh --rollback   回到更新前的那个版本
+#   ./update.sh -y           不交互，一路默认继续（给 AI / CI / cron 用）
 #
 # 你的 .env 和 data/ 都不在 git 里，全程不会被动到。
 
@@ -35,12 +36,27 @@ die()  { echo "  ${RED}✗${OFF} $*" >&2; exit 1; }
 
 STAMP_FILE=".update-previous"
 MODE="update"
-case "${1:-}" in
-  --check-only) MODE="check" ;;
-  --rollback)   MODE="rollback" ;;
-  "")           ;;
-  *)            die "未知参数 $1（可用：--check-only / --rollback）" ;;
-esac
+ASSUME_YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --check-only) MODE="check" ;;
+    --rollback)   MODE="rollback" ;;
+    -y|--yes)     ASSUME_YES=1 ;;
+    "")           ;;
+    *)            die "未知参数 $arg（可用：--check-only / --rollback / -y）" ;;
+  esac
+done
+
+confirm() {
+  # 非交互场景（AI、CI、cron）不要卡在 read 上：给 -y 就继续，否则明确说清为什么停。
+  [[ $ASSUME_YES -eq 1 ]] && { ok "已加 -y，自动继续"; return 0; }
+  if [[ ! -t 0 ]]; then
+    warn "非交互运行且没加 -y，就此停下。确认没问题的话重跑一次并加上 -y"
+    return 1
+  fi
+  read -r -p "  $1 [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
 
 # --- 判断部署方式 -------------------------------------------------------------
 
@@ -53,6 +69,30 @@ python_bin() {
   if [[ -x .venv/bin/python ]]; then echo ".venv/bin/python"
   elif [[ -x venv/bin/python ]]; then echo "venv/bin/python"
   else command -v python3 || command -v python; fi
+}
+
+interpret_check() {
+  # $1 = run.py --check 的退出码，$2 = 中止时的附加说明
+  local status="$1" note="$2"
+  case "$status" in
+    0) ok "自检通过"; return 0 ;;
+    2)
+      # 「能跑，但某类数据源只剩每日更新的备胎」——服务本身没问题，
+      # 不该因此拦住重启，否则新版永远上不去。
+      warn "自检报告数据源有缺口（退出码 2），服务本身能跑，继续"
+      return 0
+      ;;
+    *)
+      warn "自检没通过（退出码 $status），这通常意味着新版起不来"
+      warn "可以先 ./update.sh --rollback 回退，再照自检输出排查"
+      [[ "$MODE" == "check" ]] && return 1
+      if confirm "仍然重启？"; then
+        return 0
+      fi
+      echo "  ${RED}✗${OFF} 已取消${note:+，$note}" >&2
+      return 1
+      ;;
+  esac
 }
 
 # --- 回滚 ---------------------------------------------------------------------
@@ -84,8 +124,7 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   warn "有未提交的本地改动，git pull 可能冲突："
   git status --short --untracked-files=no | sed 's/^/      /'
   warn "想丢弃本地改动：git checkout -- .   想保留：git stash"
-  read -r -p "  仍然继续？[y/N] " reply
-  [[ "$reply" =~ ^[Yy]$ ]] || die "已取消"
+  confirm "仍然继续？" || die "已取消"
 fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
@@ -125,12 +164,11 @@ if uses_docker; then
   ok "镜像已就绪"
 
   say "自检"
-  docker compose run --rm bot python run.py --check || {
-    warn "自检没全过。要么按上面的提示处理，要么 ./update.sh --rollback 回退"
-    [[ "$MODE" == "check" ]] && exit 1
-    read -r -p "  仍然重启？[y/N] " reply
-    [[ "$reply" =~ ^[Yy]$ ]] || die "已取消，旧容器还在跑，服务没有中断"
-  }
+  set +e
+  docker compose run --rm bot python run.py --check
+  check_status=$?
+  set -e
+  interpret_check "$check_status" "旧容器还在跑，服务没有中断" || exit 1
 
   [[ "$MODE" == "check" ]] && { ok "只做检查，未重启"; exit 0; }
 
@@ -144,12 +182,11 @@ else
   ok "依赖已是最新"
 
   say "自检"
-  "$PY" run.py --check || {
-    warn "自检没全过。要么按上面的提示处理，要么 ./update.sh --rollback 回退"
-    [[ "$MODE" == "check" ]] && exit 1
-    read -r -p "  仍然重启？[y/N] " reply
-    [[ "$reply" =~ ^[Yy]$ ]] || die "已取消"
-  }
+  set +e
+  "$PY" run.py --check
+  check_status=$?
+  set -e
+  interpret_check "$check_status" "" || exit 1
 
   [[ "$MODE" == "check" ]] && { ok "只做检查，未重启"; exit 0; }
 

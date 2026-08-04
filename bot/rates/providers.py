@@ -177,7 +177,16 @@ class CurrencyApiProvider(RateProvider):
 class YahooFinanceProvider(RateProvider):
     """Yahoo Finance 图表接口：分钟级的准实时报价，也提供历史序列。
 
-    没有批量免鉴权接口，因此只对“热门集合”逐对拉取（并发 + 限流）。
+    没有免鉴权的批量接口，只能一个符号一个请求 —— 于是**请求节奏就是成败关键**。
+    实测：单发一次稳定 200，紧接着连发就吃 429。所以这里不再「一口气把所有
+    符号并发拉完」，而是：
+
+    * 每轮只刷新 `BATCH` 个「最久没更新」的符号，其余沿用缓存 → 轮转覆盖
+    * 并发压到 2，且每个请求之间留出间隔 → 平均约 6 次/分钟
+    * 撞到 429 就进入冷却，期间直接吃缓存，不再发请求
+    * 部分失败不清空成果：缓存里还新鲜的报价照常返回
+
+    这样每个符号大约每 4 分钟刷新一次 —— 比每日源新鲜得多，也不会招来限流。
     """
 
     name = "yahoo"
@@ -186,13 +195,26 @@ class YahooFinanceProvider(RateProvider):
     priority = 10
     supports_history = True
 
-    CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    FALLBACK_CHART = "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
-    MAX_SYMBOLS = 24
+    HOSTS = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}",
+    )
+    CHART = HOSTS[0]  # 历史查询用，单发一次不涉及限流
+
+    MAX_SYMBOLS = 24       # 一共盯这么多货币
+    BATCH = 6              # 每轮最多刷新几个
+    CONCURRENCY = 2        # 同时在飞的请求数
+    SPACING = 0.35         # 每个请求起步之间的最小间隔（秒）
+    COOLDOWN_ON_429 = 300  # 被限流后歇多久再试
+    CACHE_TTL = 900        # 缓存里的报价超过这么久就不再拿出来用
 
     def __init__(self, http, hot_set: Iterable[str] | None = None) -> None:  # noqa: ANN001
         super().__init__(http)
         self._hot: set[str] = set(hot_set or cur_mod.POPULAR)
+        #: code -> (1 USD 对应的数量, 抓到的时间)
+        self._cache: dict[str, tuple[Decimal, float]] = {}
+        self._cooldown_until = 0.0
+        self._rotation = 0
 
     def set_hot(self, codes: Iterable[str]) -> None:
         """由服务层告知“最近有人用”的货币，动态调整拉取范围。"""
@@ -207,48 +229,86 @@ class YahooFinanceProvider(RateProvider):
             return f"{code}-USD"
         return f"{code}=X"  # 隐含以 USD 为基准
 
-    async def _quote(self, code: str) -> tuple[str, Decimal] | None:
+    async def _quote(self, code: str, host_index: int) -> tuple[str, Decimal] | None:
+        """抓一个符号。只发一次请求——失败就等下一轮，别原地重试加剧限流。"""
         symbol = self.symbol_for(code)
         if not symbol:
             return code, Decimal(1)
-        for template in (self.CHART, self.FALLBACK_CHART):
-            try:
-                data = await self.http.get_json(
-                    template.format(symbol=symbol),
-                    params={"range": "1d", "interval": "5m"},
-                    retries=0,
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            meta = (((data.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
-            price = to_decimal(meta.get("regularMarketPrice"))
-            if price is None:
-                continue
-            if code in cur_mod.CRYPTO_CODES:
-                # BTC-USD 报的是 1 BTC = N USD，需要取倒数
-                return code, Decimal(1) / price
-            return code, price
-        return None
+        url = self.HOSTS[host_index % len(self.HOSTS)].format(symbol=symbol)
+        data = await self.http.get_json(url, params={"range": "1d", "interval": "5m"}, retries=0)
+        meta = (((data.get("chart") or {}).get("result") or [{}])[0] or {}).get("meta") or {}
+        price = to_decimal(meta.get("regularMarketPrice"))
+        if price is None:
+            return None
+        # BTC-USD 报的是 1 BTC = N USD，需要取倒数
+        return code, (Decimal(1) / price if code in cur_mod.CRYPTO_CODES else price)
+
+    def _due_for_refresh(self, targets: list[str]) -> list[str]:
+        """挑出本轮要刷新的符号：没缓存的优先，其次是最久没更新的。"""
+        return sorted(targets, key=lambda code: self._cache.get(code, (None, 0.0))[1])[: self.BATCH]
+
+    def _from_cache(self, targets: list[str]) -> tuple[dict[str, Decimal], float]:
+        now = time.time()
+        quotes: dict[str, Decimal] = {"USD": Decimal(1)}
+        oldest = now
+        for code in targets:
+            cached = self._cache.get(code)
+            if cached and now - cached[1] <= self.CACHE_TTL:
+                quotes[code] = cached[0]
+                oldest = min(oldest, cached[1])
+        return quotes, oldest
 
     async def fetch(self, wanted: Iterable[str] | None = None) -> ProviderResult:
         codes = {c.upper() for c in (wanted or ())} | self._hot
-        codes = {c for c in codes if cur_mod.is_known(c)}
-        codes.discard("USD")
-        targets = sorted(codes)[: self.MAX_SYMBOLS]
-        sem = asyncio.Semaphore(8)
+        targets = sorted(c for c in codes if cur_mod.is_known(c) and c != "USD")[: self.MAX_SYMBOLS]
 
-        async def guarded(code: str):  # noqa: ANN202
+        now = time.time()
+        if now < self._cooldown_until:
+            quotes, oldest = self._from_cache(targets)
+            if len(quotes) < 2:
+                raise ProviderError(
+                    f"yahoo 限流冷却中，还剩 {int(self._cooldown_until - now)}s，且无可用缓存"
+                )
+            return ProviderResult(self.name, quotes, as_of=oldest, note="cached")
+
+        sem = asyncio.Semaphore(self.CONCURRENCY)
+        due = self._due_for_refresh(targets)
+        throttled = False
+        errors: list[str] = []
+
+        async def guarded(index: int, code: str):  # noqa: ANN202
+            # 错开起步时间，避免同一瞬间打过去
+            await asyncio.sleep(index * self.SPACING)
             async with sem:
-                return await self._quote(code)
+                try:
+                    return await self._quote(code, self._rotation + index)
+                except ProviderError as exc:
+                    nonlocal throttled
+                    if "429" in str(exc):
+                        throttled = True
+                    errors.append(str(exc))
+                    return None
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{code}: {exc}")
+                    return None
 
-        results = await asyncio.gather(*(guarded(code) for code in targets))
-        quotes = {"USD": Decimal(1)}
+        results = await asyncio.gather(*(guarded(i, code) for i, code in enumerate(due)))
+        self._rotation += len(due)
+
+        fetched_now = time.time()
         for item in results:
             if item:
-                quotes[item[0]] = item[1]
-        if len(quotes) < 3:
-            raise ProviderError("yahoo 无可用报价")
-        return ProviderResult(self.name, quotes, note="realtime")
+                self._cache[item[0]] = (item[1], fetched_now)
+
+        if throttled:
+            self._cooldown_until = fetched_now + self.COOLDOWN_ON_429
+            log.warning("yahoo 被限流，冷却 %ds 后再试", self.COOLDOWN_ON_429)
+
+        quotes, oldest = self._from_cache(targets)
+        if len(quotes) < 2:
+            reason = errors[0] if errors else "无可用报价"
+            raise ProviderError(f"yahoo {reason}")
+        return ProviderResult(self.name, quotes, as_of=oldest, note="realtime")
 
     async def history(self, base: str, quote: str, days: int) -> list[tuple[date, Decimal]]:
         base, quote = base.upper(), quote.upper()
