@@ -249,28 +249,95 @@ async def self_check(cfg: Config | None = None) -> int:
         await bot.session.close()
 
     rates = RateService(cfg)
+    degraded = False
     try:
-        ok = await rates.refresh(force=True)
+        await rates.refresh(force=True)
         rows = rates.status()
         live = [row for row in rows if row["currencies"]]
         if not live:
-            print("❌ 汇率源　　一个都没连上，检查服务器出网或设 DISABLED_PROVIDERS")
+            print("❌ 汇率源　　一个都没连上，检查服务器能不能出网，或用 DISABLED_PROVIDERS 排除")
             return 1
-        print(f"{'✅' if ok >= 2 else '⚠️ '} 汇率源　　{len(live)}/{len(rows)} 个可用")
-        for row in rows:
-            mark = "🟢" if row["currencies"] else "🔴"
-            detail = f"{row['currencies']:>4} 种货币" if row["currencies"] else (row["error"] or "无数据")[:60]
-            print(f"     {mark} {row['name']:<13} {detail}")
+
+        lines, all_kinds_ok, kinds_degraded = diagnose_providers(rows)
+        degraded = degraded or kinds_degraded
+        print(f"{'✅' if all_kinds_ok else '❌'} 汇率源　　{len(live)}/{len(rows)} 个在线")
+        for line in lines:
+            print(f"     {line}")
+
         try:
             rate = rates.get_rate("USD", "CNY")
             print(f"✅ 试算　　　1 USD = {rate.value:.4f} CNY（来自 {'/'.join(rate.sources)}）")
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️  试算　　　USD/CNY 拿不到：{exc}")
+            degraded = True
     finally:
         await rates.http.close()
 
-    print("─" * 46 + "\n全部通过，可以 python run.py 正式启动了。")
+    print("─" * 46)
+    if degraded:
+        print("⚠️  能跑，但有数据源缺口，建议照上面的提示处理后再上线。")
+        return 2
+    print("全部通过，可以 python run.py 正式启动了。")
     return 0
+
+
+def _short_error(error: str) -> str:
+    """把 provider 的报错压成一行，去掉又长又没用的 URL 前缀。"""
+    text = (error or "无数据").replace("https://", "").replace("http://", "")
+    return (text[:52] + "…") if len(text) > 53 else text
+
+
+#: priority 小于等于这个值的源才算「准实时」，否则是每日更新的兜底源
+REALTIME_PRIORITY = 20
+
+
+def diagnose_providers(rows: list[dict[str, object]]) -> tuple[list[str], bool, bool]:
+    """把 `RateService.status()` 翻成人能看懂的诊断。
+
+    返回 (待打印的行, 两类报价是否都有源, 是否处于降级状态)。
+
+    判断的关键不是「几个源活着」，而是法币和加密**各自**还有没有人供数、
+    以及顶上来的是不是准实时源 —— 只剩每日更新的兜底源时，
+    bot 还能跑，但「实时汇率」这个卖点就没了，必须说清楚。
+    """
+    categories: dict[str, list[dict[str, object]]] = {
+        "法币": [row for row in rows if row["kind"] in ("fiat", "mixed")],
+        "加密": [row for row in rows if row["kind"] in ("crypto", "mixed")],
+    }
+    exact_kind = {"法币": "fiat", "加密": "crypto"}
+    healthy = {label for label, group in categories.items() if any(r["currencies"] for r in group)}
+
+    lines: list[str] = []
+    for row in rows:
+        if row["currencies"]:
+            lines.append(f"🟢 {str(row['name']):<13} {row['currencies']:>4} 种货币")
+            continue
+        covered = all(label in healthy for label, group in categories.items() if row in group)
+        mark, tail = ("🟡", "（有其他源顶着）") if covered else ("🔴", "（没有源能接替）")
+        lines.append(f"{mark} {str(row['name']):<13} {_short_error(str(row['error']))}{tail}")
+
+    degraded = False
+    for label, group in categories.items():
+        # 同优先级时，专职源（binance 之于加密）优于通吃源（yahoo），后者覆盖面更窄
+        alive = sorted(
+            (r for r in group if r["currencies"]),
+            key=lambda r: (int(r["priority"]), 0 if r["kind"] == exact_kind[label] else 1),
+        )
+        if not alive:
+            names = " / ".join(str(r["name"]) for r in group)
+            lines.append(f"⛔ {label}报价无源可用：{names} 全挂了，这类换算会直接失败")
+            degraded = True
+            continue
+        best = alive[0]
+        if int(best["priority"]) <= REALTIME_PRIORITY:
+            lines.append(f"✅ {label}主力 {best['name']}，准实时（还有 {len(alive) - 1} 个备用）")
+        else:
+            lines.append(
+                f"⚠️  {label}只剩每日更新的 {best['name']}，汇率一天才变一次，实时性达不到预期"
+            )
+            degraded = True
+
+    return lines, len(healthy) == 2, degraded
 
 
 def main(argv: list[str] | None = None) -> None:

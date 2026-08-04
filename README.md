@@ -182,15 +182,39 @@ python run.py --check
 ✅ 配置　　　token 格式正确，数据目录 /app/data
 ✅ 数据库　　/app/data/bot.db 可读写
 ✅ Telegram　已登录 @my_huilv_bot
-✅ 汇率源　　6/7 个可用
-     🟢 yahoo            22 种货币
-     🟢 binance          31 种货币
-     🔴 coingecko        被限流 (429)
-     ...
-✅ 试算　　　1 USD = 7.2431 CNY（来自 yahoo）
+✅ 汇率源　　6/7 个在线
+     🟢 binance         31 种货币
+     🟢 okx             28 种货币
+     🟡 coingecko     api.coingecko.com 请求过频被限流 (429，60s 后可重试)（有其他源顶着）
+     🟢 frankfurter     31 种货币
+     🟢 open-er-api    163 种货币
+     🟢 yahoo           22 种货币
+     🟢 currency-api   140 种货币
+     ✅ 法币主力 yahoo，准实时（还有 3 个备用）
+     ✅ 加密主力 binance，准实时（还有 3 个备用）
+✅ 试算　　　1 USD = 7.2431 CNY（来自 binance）
 ──────────────────────────────────────────────
 全部通过，可以 python run.py 正式启动了。
 ```
+
+**怎么看这份报告**：不用数「几个源是绿的」，只看最后那两行结论 ——
+只要法币和加密各自都有一个准实时主力，就没问题。
+
+| 标记 | 含义 | 要不要管 |
+| --- | --- | --- |
+| 🟢 | 这个源正常供数 | 不用管 |
+| 🟡 | 挂了，但同类还有源顶着 | **不用管**，备胎没上场而已 |
+| 🔴 | 挂了，而且没有源能接替 | 要管 |
+| ⚠️ 只剩每日更新的… | 还能换算，但汇率一天才动一次 | 要管，见下 |
+| ⛔ …无源可用 | 这一类换算会直接失败 | 必须管 |
+
+退出码：`0` 全部正常，`1` 起不来（配置/数据库/Telegram），`2` 能跑但有数据源缺口。
+
+**上面那条 429 是什么？** HTTP `429 Too Many Requests` = 对方限流了。
+CoinGecko 免费接口大约每分钟只允许 5～15 次调用，而且按 IP 计，
+共享 IP 的 VPS 很容易撞上。它在加密货币里排第 3 备胎（Binance → OKX → CoinGecko），
+只要前面有一个是绿的就毫无影响 —— 代码会自动退避（15s → 30s → … 最多 10 分钟）
+并从别的源取数。嫌它碍眼可以直接关掉：`.env` 里加 `DISABLED_PROVIDERS=coingecko`。
 
 任何一步失败都会直接告诉你原因和怎么修，不会甩一堆 traceback。
 Docker 下自检：`docker compose run --rm bot python run.py --check`。
@@ -280,6 +304,8 @@ TELEGRAM_PROXY=http://127.0.0.1:7890        # 或 socks5://127.0.0.1:1080
 | 群里不回话 | 正常：群里要 @它、回复它，或用 `/c 100 usd cny`；想让它读所有消息就关 privacy |
 | `@bot ...` 没结果 | BotFather 里没开 `/setinline` |
 | 回复里写「数据较旧」 | 汇率源暂时连不上，发 `/status` 看哪个红了 |
+| 自检里某个源 429 | 对方限流了。只要同类还有绿的就不用管，也可 `DISABLED_PROVIDERS=` 关掉它 |
+| 自检提示「只剩每日更新的源」 | 实时源都连不上（常见于出网受限的机器），换台境外机器最省事 |
 | `/chart` 没图只有字符 | 没装 matplotlib，`pip install matplotlib` 即可 |
 | 端口被占用 | 只有 webhook 模式才用端口，长轮询模式不需要，把 `WEBHOOK_BASE` 留空 |
 

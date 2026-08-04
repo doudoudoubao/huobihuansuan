@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -130,20 +131,28 @@ class HttpClient:
                 session = await self.session()
                 async with session.get(url, params=params, headers=headers) as resp:
                     if resp.status == 429:
-                        raise ProviderError(f"{url} 被限流 (429)")
+                        # 免费接口按 IP 限流很常见，把建议的等待时间也带上
+                        retry_after = resp.headers.get("Retry-After", "").strip()
+                        suffix = f"，{retry_after}s 后可重试" if retry_after.isdigit() else ""
+                        raise ProviderError(f"{_host(url)} 请求过频被限流 (429{suffix})")
                     if resp.status >= 400:
-                        raise ProviderError(f"{url} 返回 HTTP {resp.status}")
+                        raise ProviderError(f"{_host(url)} 返回 HTTP {resp.status}")
                     # 某些 CDN 会用 text/plain 返回 JSON
                     return await resp.json(content_type=None)
             except (aiohttp.ClientError, asyncio.TimeoutError, ProviderError, ValueError) as exc:
                 last_exc = exc
                 if attempt < retries:
                     await asyncio.sleep(0.4 * (attempt + 1))
-        raise ProviderError(str(last_exc) if last_exc else f"{url} 请求失败")
+        raise ProviderError(str(last_exc) if last_exc else f"{_host(url)} 请求失败")
 
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+
+
+def _host(url: str) -> str:
+    """报错里只留域名——完整 URL 又长又帮不上忙。"""
+    return urlsplit(url).netloc or url
 
 
 def to_decimal(value: Any) -> Decimal | None:
