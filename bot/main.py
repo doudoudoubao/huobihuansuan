@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from aiogram.types import (
 )
 
 from .config import Config, StartupError, config as default_config
-from .console import Report
+from .console import Report, paint
 from .db import Database
 from .handlers import build_router
 from .middlewares import PrefsMiddleware, ThrottleMiddleware
@@ -213,11 +215,49 @@ async def _run_webhook(bot: Bot, dp: Dispatcher, cfg: Config) -> None:
         await runner.cleanup()
 
 
+@contextlib.contextmanager
+def quiet_logs() -> Iterator[list[logging.LogRecord]]:
+    """自检期间把日志收进缓冲区，别让它冲乱报告的排版。
+
+    `--check` 不走 `setup_logging()`，根 logger 没有任何 handler，于是 logging
+    会启用 lastResort 把 WARNING 直接吐到 stderr —— 「yahoo 被限流」这种报告里
+    已经用 ○ 写明的事会再冒出来一遍，还正好插在对齐好的框子中间。
+
+    收起来不等于丢掉：ERROR 及以上是报告没覆盖到的意外，退出前照样补印。
+    """
+    captured: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    root.handlers = [_Sink(logging.WARNING)]
+    root.setLevel(logging.WARNING)
+    try:
+        yield captured
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+
+
 async def self_check(cfg: Config | None = None) -> int:
     """`python run.py --check`：部署前把配置、Telegram 连通性、汇率源过一遍。"""
-    cfg = cfg or default_config
     report = Report("部署自检 · 货币换算 Bot")
+    with quiet_logs() as logs:
+        code = await _run_checks(cfg or default_config, report)
 
+    stray = [r for r in logs if r.levelno >= logging.ERROR]
+    if stray:
+        print("  " + paint("检查过程中还有这些错误日志：", "yellow"))
+        for record in stray:
+            report.detail(f"{record.name}: {record.getMessage()}", indent=4)
+        print()
+    return code
+
+
+async def _run_checks(cfg: Config, report: Report) -> int:
+    """自检的正文。每一步要么继续，要么直接 close 掉给出退出码。"""
     try:
         cfg.validate()
     except StartupError as exc:

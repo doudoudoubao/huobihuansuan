@@ -214,3 +214,45 @@ def test_cannot_join_groups_is_flagged():
     status, text = describe_capabilities(_me(can_join_groups=False))[1]
     assert status == "warn"
     assert "setjoingroups" in text
+
+
+# --- 自检期间的日志噪音 --------------------------------------------------
+# 汇率源限流这类事，报告里已经用 ○ 写清楚了。日志再往 stderr 吐一遍，
+# 就会插进对齐好的框子中间，把排版冲乱 —— 用户实际反馈过一次。
+
+
+def test_warnings_do_not_leak_to_stderr(capsys):
+    import logging
+
+    from bot.main import quiet_logs
+
+    with quiet_logs() as logs:
+        logging.getLogger("bot.rates.providers").warning("yahoo 被限流，冷却 600s 后再试")
+
+    assert capsys.readouterr().err == ""
+    assert [r.getMessage() for r in logs] == ["yahoo 被限流，冷却 600s 后再试"]
+
+
+def test_errors_are_kept_for_later_not_dropped():
+    import logging
+
+    from bot.main import quiet_logs
+
+    with quiet_logs() as logs:
+        logging.getLogger("bot.x").info("琐碎")
+        logging.getLogger("bot.x").error("没料到的错")
+
+    assert [(r.levelname, r.getMessage()) for r in logs] == [("ERROR", "没料到的错")]
+
+
+def test_logging_config_is_restored_afterwards():
+    import logging
+
+    from bot.main import quiet_logs
+
+    root = logging.getLogger()
+    before_handlers, before_level = root.handlers[:], root.level
+    with quiet_logs():
+        pass
+    assert root.handlers == before_handlers
+    assert root.level == before_level
