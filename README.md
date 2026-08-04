@@ -100,38 +100,188 @@
 
 ---
 
-## 二、跑起来
+## 二、安装
 
-### 方式 A：本机直接跑
+### 第 0 步：拿到 BOT_TOKEN（约 1 分钟）
+
+1. 在 Telegram 里搜 **@BotFather**，点 Start
+2. 发送 `/newbot`
+3. 先取一个显示名（中文也行，比如「汇率助手」）
+4. 再取一个用户名，**必须以 `bot` 结尾**，比如 `my_huilv_bot`
+5. BotFather 会回一串 token，形如 `123456789:AAEhBOweik6ad9r_wAbCdEf...`，复制好
+6. 顺手开一下 inline 模式：发 `/setinline` → 选中你的 bot → 提示语填 `100 usd jpy`
+
+> token 等于账号密码，别提交进 Git、别发群里。泄露了就去 BotFather 发 `/revoke` 重置。
+
+---
+
+### 方式 A：Docker（推荐）
+
+机器上有 Docker 就行，不用管 Python 版本。
 
 ```bash
-git clone <repo> && cd huobihuansuan
-pip install -r requirements.txt
+git clone https://github.com/doudoudoubao/huobihuansuan.git
+cd huobihuansuan
 
 cp .env.example .env
-# 编辑 .env，把 @BotFather 给的 BOT_TOKEN 填进去
+nano .env            # 把 BOT_TOKEN=  后面填上刚才那串
 
-python run.py
-```
-
-### 方式 B：Docker
-
-```bash
-cp .env.example .env    # 填好 BOT_TOKEN
 docker compose up -d --build
 docker compose logs -f
 ```
 
-数据落在 `./data/`（SQLite + 汇率缓存），备份这个目录就够了。
+日志里出现 `已登录为 @你的bot名` 就成了，去 Telegram 找它发个 `100rmb` 试试。
 
-### BotFather 需要做的两件事
+日常管理：
 
-1. `/setinline` 打开 inline 模式（否则 `@bot 100 usd jpy` 用不了），
-   placeholder 建议填 `100 usd jpy`
-2. 想让 bot 在群里能读到普通消息，`/setprivacy` → `Disable`；
-   保持 `Enable` 也能用，只是群里必须 @它或用 `/c`
+```bash
+docker compose logs -f          # 看日志
+docker compose restart          # 重启
+docker compose down             # 停止
+docker compose up -d --build    # 改了代码后重新部署
+```
 
-命令菜单在启动时自动注册，不用手动 `/setcommands`。
+---
+
+### 方式 B：直接用 Python 跑
+
+需要 **Python 3.11 或更高**（`python3 -V` 确认一下）。
+
+```bash
+git clone https://github.com/doudoudoubao/huobihuansuan.git
+cd huobihuansuan
+
+python3 -m venv .venv
+source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+cp .env.example .env             # Windows: copy .env.example .env
+# 编辑 .env 填入 BOT_TOKEN
+
+python run.py --check            # 先自检，见下
+python run.py                    # 正式启动
+```
+
+按 `Ctrl+C` 停止。
+
+---
+
+### 启动前：先自检一遍
+
+正式启动前建议先跑：
+
+```bash
+python run.py --check
+```
+
+它会依次验证配置、数据库、Telegram 连通性和 7 个汇率源，输出类似：
+
+```
+🩺 部署自检
+──────────────────────────────────────────────
+✅ 配置　　　token 格式正确，数据目录 /app/data
+✅ 数据库　　/app/data/bot.db 可读写
+✅ Telegram　已登录 @my_huilv_bot
+✅ 汇率源　　6/7 个可用
+     🟢 yahoo            22 种货币
+     🟢 binance          31 种货币
+     🔴 coingecko        被限流 (429)
+     ...
+✅ 试算　　　1 USD = 7.2431 CNY（来自 yahoo）
+──────────────────────────────────────────────
+全部通过，可以 python run.py 正式启动了。
+```
+
+任何一步失败都会直接告诉你原因和怎么修，不会甩一堆 traceback。
+Docker 下自检：`docker compose run --rm bot python run.py --check`。
+
+---
+
+### 让它开机自启（systemd，Linux 服务器）
+
+用 Docker 的话 `restart: unless-stopped` 已经管了，这段可跳过。
+
+```bash
+sudo tee /etc/systemd/system/huobihuansuan.service > /dev/null <<EOF
+[Unit]
+Description=Currency Converter Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$PWD
+ExecStart=$PWD/.venv/bin/python $PWD/run.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now huobihuansuan
+sudo systemctl status huobihuansuan       # 看状态
+journalctl -u huobihuansuan -f            # 看日志
+```
+
+---
+
+### 大陆服务器：配代理
+
+`api.telegram.org` 在大陆直连不通，在 `.env` 里加一行：
+
+```bash
+TELEGRAM_PROXY=http://127.0.0.1:7890        # 或 socks5://127.0.0.1:1080
+```
+
+代理跑在宿主机、bot 跑在 Docker 里时，把地址写成 `http://host.docker.internal:7890`，
+并在 `docker-compose.yml` 的 `bot` 服务下加：
+
+```yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+留空则直连；留空时也会自动沿用环境变量 `HTTPS_PROXY`。
+
+> 数据源那边（Yahoo / Binance 等）大多在大陆能直连，但如果 `--check` 显示大片红色，
+> 说明服务器出网受限，最省事的办法是直接换一台境外小鸡。
+
+---
+
+### BotFather 的两个可选开关
+
+1. `/setinline` —— 不开的话 `@你的bot 100 usd jpy` 这种用法不可用（**建议开**）
+2. `/setprivacy` → `Disable` —— 让 bot 在群里能读到普通消息。
+   保持默认的 `Enable` 也能用，只是群里必须 @它、回复它或用 `/c`
+
+命令菜单（输入 `/` 弹出的那个列表）启动时自动注册，不用手动 `/setcommands`。
+
+---
+
+### 装完之后
+
+数据全在 `./data/` 里（SQLite + 汇率缓存），**备份这个目录就等于备份了一切**。
+升级只要 `git pull` 然后重启（Docker 用户加 `--build`），数据库会自动兼容。
+
+---
+
+### 常见问题
+
+| 现象 | 原因和解法 |
+| --- | --- |
+| `❌ 缺少 BOT_TOKEN` | `.env` 没建，或者 `BOT_TOKEN=` 后面是空的 |
+| `❌ BOT_TOKEN 格式不对` | 复制时漏字符，或把引号一起粘进去了 |
+| `❌ 401 Unauthorized` | token 错了或被 `/revoke` 过，去 BotFather `/mybots` 重新拿 |
+| `❌ 连不上 api.telegram.org` | 需要代理，见上面「大陆服务器」一节 |
+| bot 不回话 | 先在私聊里发 `/start`；看 `docker compose logs -f` 有没有报错 |
+| 群里不回话 | 正常：群里要 @它、回复它，或用 `/c 100 usd cny`；想让它读所有消息就关 privacy |
+| `@bot ...` 没结果 | BotFather 里没开 `/setinline` |
+| 回复里写「数据较旧」 | 汇率源暂时连不上，发 `/status` 看哪个红了 |
+| `/chart` 没图只有字符 | 没装 matplotlib，`pip install matplotlib` 即可 |
+| 端口被占用 | 只有 webhook 模式才用端口，长轮询模式不需要，把 `WEBHOOK_BASE` 留空 |
 
 ---
 
@@ -150,6 +300,7 @@ docker compose logs -f
 | `MULTI_TARGET_COUNT` | `10` | 只发金额时一次列几行 |
 | `MAX_FAVORITES` | `20` | 每个用户最多收藏几个 |
 | `DISABLED_PROVIDERS` | 空 | 逗号分隔，禁用指定数据源 |
+| `TELEGRAM_PROXY` | 空 | 访问 api.telegram.org 的代理，支持 http / socks5 |
 | `WEBHOOK_BASE` | 空 | 留空走长轮询；填了就切 webhook |
 
 Webhook 模式下会额外暴露 `GET /healthz` 供探活。
@@ -196,8 +347,9 @@ bot/
 ## 五、测试
 
 ```bash
-python -m pytest        # 全部离线用例，不打真实 API
+python -m pytest              # 全部离线用例，不打真实 API
 python -m pyflakes bot tests run.py
+python run.py --check         # 连真实环境跑一遍（需要 BOT_TOKEN）
 ```
 
 数据源的解析逻辑用录制好的响应体做单测（`tests/test_providers.py`），

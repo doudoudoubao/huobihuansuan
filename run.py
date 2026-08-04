@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""启动入口：python run.py（会自动读取同目录下的 .env）。"""
+"""启动入口。
+
+    python run.py           正式启动
+    python run.py --check   部署自检：配置 / 数据库 / Telegram / 汇率源
+
+会自动读取同目录下的 .env。
+"""
 
 from __future__ import annotations
 

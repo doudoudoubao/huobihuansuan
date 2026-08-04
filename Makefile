@@ -1,10 +1,13 @@
-.PHONY: install run test lint docker
+.PHONY: install run check test lint docker
 
 install:
 	pip install -r requirements.txt
 
 run:
 	python run.py
+
+check:
+	python run.py --check
 
 test:
 	python -m pytest

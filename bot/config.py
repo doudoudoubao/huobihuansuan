@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
+
+
+class StartupError(RuntimeError):
+    """配置或环境有问题，启动前就能发现。消息会直接打给用户看。"""
 
 
 def _env_str(key: str, default: str) -> str:
@@ -49,6 +56,10 @@ class Config:
     webhook_secret: str = field(default_factory=lambda: _env_str("WEBHOOK_SECRET", ""))
     webapp_host: str = field(default_factory=lambda: _env_str("WEBAPP_HOST", "0.0.0.0"))
     webapp_port: int = field(default_factory=lambda: _env_int("WEBAPP_PORT", 8080))
+    # 访问 api.telegram.org 需要走代理时填，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
+    telegram_proxy: str = field(
+        default_factory=lambda: _env_str("TELEGRAM_PROXY", "") or _env_str("HTTPS_PROXY", "")
+    )
     admin_ids: list[int] = field(
         default_factory=lambda: [
             int(x) for x in _env_str("ADMIN_IDS", "").replace(";", ",").split(",") if x.strip().isdigit()
@@ -98,10 +109,23 @@ class Config:
 
     def validate(self) -> None:
         if not self.bot_token:
-            raise SystemExit(
-                "缺少 BOT_TOKEN。请复制 .env.example 为 .env 并填入 @BotFather 给的 token。"
+            raise StartupError(
+                "缺少 BOT_TOKEN。\n"
+                "  1. 在 Telegram 里找 @BotFather，发送 /newbot 创建机器人\n"
+                "  2. 复制它给的 token（形如 123456789:AAE...）\n"
+                "  3. cp .env.example .env，把 token 填到 BOT_TOKEN= 后面\n"
+                "  也可以直接用环境变量：BOT_TOKEN=xxx python run.py"
             )
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        if not TOKEN_RE.match(self.bot_token):
+            raise StartupError(
+                f"BOT_TOKEN 格式不对：{self.bot_token[:12]}…\n"
+                "  正确的样子是「一串数字:一串字母数字」，例如 123456789:AAEhBOweik6ad...\n"
+                "  常见原因：复制时漏了字符、把引号也粘进去了、或者填成了别的东西。"
+            )
+        try:
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise StartupError(f"创建数据目录失败：{self.db_path} —— {exc}") from exc
 
     @property
     def use_webhook(self) -> bool:

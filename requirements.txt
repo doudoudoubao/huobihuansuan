@@ -3,6 +3,9 @@ aiogram>=3.13,<4
 aiohttp>=3.9
 aiosqlite>=0.20
 
+# 让 TELEGRAM_PROXY 支持 http/socks5 代理（大陆服务器基本都需要）
+aiohttp-socks>=0.8
+
 # 走势图（可选）：不装也能跑，/chart 会退化成文字迷你走势
 matplotlib>=3.7
 
