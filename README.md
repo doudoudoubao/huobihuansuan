@@ -115,13 +115,65 @@
 
 ---
 
-### 方式 A：Docker（推荐）
+### 方式 A：让 AI 帮你装（最省事）
+
+如果你手上有能执行命令的 AI（Claude Code、Cursor、各种 SSH 助手），
+把下面这段整个复制给它就行：
+
+---
+
+> 帮我在这台机器上部署一个 Telegram 货币换算机器人。
+>
+> 仓库：`https://github.com/doudoudoubao/huobihuansuan`
+> 分支：`claude/currency-converter-tg-bot-jcw3or`（如果已经合并进 main 就用 main）
+>
+> 请按这个顺序做：
+>
+> 1. clone 仓库并切到上面那个分支
+> 2. 优先用 Docker 部署（`docker compose up -d --build`）；
+>    机器上没有 Docker 就退回 Python 方案：Python 3.11+ 建 venv、
+>    `pip install -r requirements.txt`
+> 3. `cp .env.example .env`，然后把我给你的 BOT_TOKEN 填进 `BOT_TOKEN=` 后面。
+>    **不要把 .env 提交进 git，也不要把 token 打印到日志或聊天里。**
+> 4. 正式启动前先跑 `python run.py --check`（Docker 下用
+>    `docker compose run --rm bot python run.py --check`）。
+>    这个自检会验证配置、数据库、Telegram 连通性和 7 个汇率源。
+>    退出码：0 = 全部正常，1 = 起不来，2 = 能跑但有数据源缺口。
+> 5. 看自检结果决定要不要处理：
+>    - 🟡 标记的源挂了但同类还有源顶着 —— **忽略即可，这是正常的**
+>    - 🔴 或 ⛔ —— 需要处理，按它给的提示排查
+>    - 提示「连不上 api.telegram.org」—— 说明要走代理，
+>      在 `.env` 里设 `TELEGRAM_PROXY=http://127.0.0.1:7890`
+>      （或 `socks5://...`，用机器上实际能用的代理端口）。
+>      代理在宿主机、bot 在 Docker 里时地址写 `http://host.docker.internal:7890`，
+>      并给 compose 的 bot 服务加 `extra_hosts: ["host.docker.internal:host-gateway"]`
+> 6. 自检通过后正式启动，确认日志里出现「已登录为 @xxx」
+> 7. 用 Docker 的话已经带自动重启；用 Python 的话帮我配一个 systemd 服务常驻，
+>    仓库 README 里有现成的配置
+> 8. 最后告诉我：bot 的用户名是什么、日志怎么看、怎么重启
+>
+> 遇到报错不要猜，先看 `docker compose logs -f` 或自检输出的原文，
+> 这个项目的报错信息是写给人看的，会直接说明原因和解法。
+
+---
+
+**唯一需要你亲自做的事**：去 Telegram 找 **@BotFather** 发 `/newbot` 拿到 token
+（上面第 0 步有详细流程），然后把 token 给 AI。
+
+> token 相当于这个机器人的账号密码。如果你不想让 AI 看到它，
+> 可以让它「把 `.env` 建好、`BOT_TOKEN=` 留空」，你自己再手动填一行，
+> 然后让它继续跑第 4 步。泄露了就去 BotFather 发 `/revoke` 重置。
+
+---
+
+### 方式 B：Docker（自己动手）
 
 机器上有 Docker 就行，不用管 Python 版本。
 
 ```bash
 git clone https://github.com/doudoudoubao/huobihuansuan.git
 cd huobihuansuan
+git checkout claude/currency-converter-tg-bot-jcw3or   # 已合并进 main 的话跳过这行
 
 cp .env.example .env
 nano .env            # 把 BOT_TOKEN=  后面填上刚才那串
@@ -143,13 +195,14 @@ docker compose up -d --build    # 改了代码后重新部署
 
 ---
 
-### 方式 B：直接用 Python 跑
+### 方式 C：直接用 Python 跑
 
 需要 **Python 3.11 或更高**（`python3 -V` 确认一下）。
 
 ```bash
 git clone https://github.com/doudoudoubao/huobihuansuan.git
 cd huobihuansuan
+git checkout claude/currency-converter-tg-bot-jcw3or   # 已合并进 main 的话跳过这行
 
 python3 -m venv .venv
 source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
