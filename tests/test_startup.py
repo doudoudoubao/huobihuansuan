@@ -153,3 +153,64 @@ def test_error_text_is_shortened():
     assert len(_short_error(long_url)) <= 53
     assert not _short_error(long_url).startswith("https://")
     assert _short_error("") == "无数据"
+
+
+# --- BotFather 开关的真实状态 -------------------------------------------------
+#
+# inline / 群隐私这些开关只存在于 Telegram 那边，代码控制不了，
+# 唯一的真相来源就是 getMe。不把它显示出来，「inline 怎么没反应」就只能靠猜。
+
+
+def _me(**overrides):
+    from types import SimpleNamespace
+
+    fields = {
+        "username": "my_bot",
+        "supports_inline_queries": True,
+        "can_join_groups": True,
+        "can_read_all_group_messages": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_inline_disabled_is_flagged():
+    from bot.main import describe_capabilities
+
+    rows = describe_capabilities(_me(supports_inline_queries=False))
+    status, text = rows[0]
+    assert status == "warn"
+    assert "/setinline" in text
+
+
+def test_inline_enabled_shows_how_to_use_it():
+    from bot.main import describe_capabilities
+
+    status, text = describe_capabilities(_me())[0]
+    assert status == "ok"
+    assert "@my_bot" in text
+
+
+def test_group_privacy_default_is_explained_not_warned():
+    """默认只收命令和 @ 是正常配置，不该报警，但要说清楚怎么改。"""
+    from bot.main import describe_capabilities
+
+    status, text = describe_capabilities(_me())[1]
+    assert status == "ok"
+    assert "Group Privacy" in text and "重新拉进去" in text
+
+
+def test_group_privacy_off_is_reported():
+    from bot.main import describe_capabilities
+
+    status, text = describe_capabilities(_me(can_read_all_group_messages=True))[1]
+    assert status == "ok"
+    assert "可读全部消息" in text
+
+
+def test_cannot_join_groups_is_flagged():
+    from bot.main import describe_capabilities
+
+    status, text = describe_capabilities(_me(can_join_groups=False))[1]
+    assert status == "warn"
+    assert "setjoingroups" in text

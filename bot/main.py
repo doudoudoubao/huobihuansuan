@@ -249,6 +249,9 @@ async def self_check(cfg: Config | None = None) -> int:
         me = await _login(bot, cfg)
         via = f" · 经代理 {cfg.telegram_proxy}" if cfg.telegram_proxy else ""
         report.line("ok", "Telegram", f"已登录 @{me.username}{via}")
+        # BotFather 里的开关只能从 getMe 得知，不看这个就只能靠猜
+        for status, text in describe_capabilities(me):
+            report.verdict(status, text)
     except StartupError as exc:
         report.line("fail", "Telegram", "连不上")
         report.detail(exc)
@@ -301,6 +304,34 @@ def _short_error(error: str) -> str:
     """把 provider 的报错压成一行，去掉又长又没用的 URL 前缀。"""
     text = (error or "无数据").replace("https://", "").replace("http://", "")
     return (text[:52] + "…") if len(text) > 53 else text
+
+
+def describe_capabilities(me) -> list[tuple[str, str]]:  # noqa: ANN001 - aiogram 的 User
+    """把 BotFather 里那几个开关的真实状态讲清楚。
+
+    这些开关只存在于 Telegram 那边，代码没法控制，唯一的真相来源就是
+    getMe 的返回值。不看这个，「inline 怎么没反应」只能靠猜。
+    """
+    rows: list[tuple[str, str]] = []
+
+    if me.supports_inline_queries:
+        rows.append(("ok", f"inline 模式已开，可在任意聊天输入 @{me.username} 100 usd cny"))
+    else:
+        rows.append(
+            ("warn", "inline 模式未开 —— @bot 那种用法不会有反应。"
+                     "去 BotFather 发 /setinline 选中这个 bot 并给一句提示语")
+        )
+
+    if not me.can_join_groups:
+        rows.append(("warn", "这个 bot 被禁止加入群组（BotFather /setjoingroups 可打开）"))
+    elif me.can_read_all_group_messages:
+        rows.append(("ok", "群内可读全部消息，直接发「100 usd cny」它就会应"))
+    else:
+        rows.append(
+            ("ok", "群内只收命令 / @它 / 回复它（默认如此）。"
+                   "想让它读全部群消息：BotFather → Group Privacy → Turn off，然后把它移出群再重新拉进去")
+        )
+    return rows
 
 
 #: priority 小于等于这个值的源才算「准实时」，否则是每日更新的兜底源

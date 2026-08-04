@@ -284,6 +284,8 @@ python run.py --check
   ✓  配置      token 正常 · 数据目录 /app/data
   ✓  数据库    /app/data/bot.db 可读写
   ✓  Telegram  已登录 @my_huilv_bot
+      └ inline 模式已开，可在任意聊天输入 @my_huilv_bot 100 usd cny
+      └ 群内只收命令 / @它 / 回复它（默认如此）
   ✓  汇率源    6/7 在线
       ● binance         31 种货币
       ● okx             28 种货币
@@ -384,7 +386,11 @@ TELEGRAM_PROXY=http://127.0.0.1:7890        # 或 socks5://127.0.0.1:1080
 
 1. `/setinline` —— 不开的话 `@你的bot 100 usd jpy` 这种用法不可用（**建议开**）
 2. `/setprivacy` → `Disable` —— 让 bot 在群里能读到普通消息。
-   保持默认的 `Enable` 也能用，只是群里必须 @它、回复它或用 `/c`
+   保持默认的 `Enable` 也能用，只是群里必须 @它、回复它或用 `/c`。
+   **改完要把 bot 移出群再重新拉进去**，否则不生效
+
+这两个开关只存在于 Telegram 那边，代码控制不了。`python run.py --check`
+会把它们的**真实状态**打出来（数据来自 getMe），不用凭印象猜有没有设成功。
 
 命令菜单（输入 `/` 弹出的那个列表）启动时自动注册，不用手动 `/setcommands`。
 
@@ -466,7 +472,7 @@ git pull && pip install -r requirements.txt && sudo systemctl restart huobihuans
 | `❌ 连不上 api.telegram.org` | 需要代理，见上面「大陆服务器」一节 |
 | bot 不回话 | 先在私聊里发 `/start`；看 `docker compose logs -f` 有没有报错 |
 | 群里不回话 | 正常：群里要 @它、回复它，或用 `/c 100 usd cny`；想让它读所有消息就关 privacy |
-| `@bot ...` 没结果 | BotFather 里没开 `/setinline` |
+| `@bot ...` 没结果 | inline 没开。**别靠猜**：跑 `--check`，它会直接告诉你 inline 到底开没开（这个状态只有 Telegram 那边知道，看 getMe 才准）。没开就去 BotFather 发 `/setinline`；开了还没反应就是客户端缓存，彻底退出 Telegram 再进 |
 | 页脚写「🗓 每日更新 · 昨日报价」 | 正常。这一对走的是欧洲央行这类每日源，它一天只公布一次价。想要准实时得让 Yahoo 那条链通（`/status` 看它是不是红的） |
 | 页脚写「⚠️ 数据源连不上」 | 真出问题了：已经很久没成功刷新。发 `/status` 看哪个源挂了 |
 | 某个源一直连不上，想弄清为什么 | 跑 `python3 scripts/probe_sources.py`（Docker 下 `docker compose run --rm bot python scripts/probe_sources.py`），它会把各候选源在这台机器上的真实响应打出来 |
