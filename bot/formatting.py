@@ -151,9 +151,12 @@ def render_conversion(
     amount_text = fmt_input_amount(conv.amount, conv.base, prefs)
     result_text = fmt_money(conv.result, conv.quote, prefs)
 
+    base_name = f"  {esc(currency_name(conv.base, lang))}" if prefs.show_names else ""
+    quote_name = f"  {esc(currency_name(conv.quote, lang))}" if prefs.show_names else ""
+
     lines = [
-        f"{base.flag} {esc(amount_text)} {esc(conv.base)}" + expression_hint(expression),
-        f"{quote.flag} <b>{esc(result_text)} {esc(conv.quote)}</b>",
+        f"{base.flag} {esc(amount_text)} {esc(conv.base)}{base_name}" + expression_hint(expression),
+        f"{quote.flag} <b>{esc(result_text)} {esc(conv.quote)}</b>{quote_name}",
         "",
     ]
 
@@ -197,13 +200,21 @@ def render_multi(
     对齐的关键：货币代码和数值必须在**同一个** <code> 里，
     Telegram 才会用等宽字体渲染整段、右对齐才立得住。
     国旗 emoji 留在 code 外面，每行都有且只有一个，起点自然齐平。
+
+    货币名（美元 / 港币…）放在 code 块**之后**：中文在等宽字体里的宽度
+    各客户端不一致，塞进 code 会把好不容易对齐的数字列顶歪；
+    放在定宽 code 块后面，反而每行都从同一列开始。
     """
     lang = prefs.lang
     base_meta = cur_mod.get(base)
     amount_text = fmt_input_amount(amount, base, prefs)
 
     icon = base_meta.flag or "💱"
-    lines = [f"{icon} <b>{esc(amount_text)} {esc(base)}</b>" + expression_hint(expression), ""]
+    base_name = f"  {esc(currency_name(base, lang))}" if prefs.show_names else ""
+    lines = [
+        f"{icon} <b>{esc(amount_text)} {esc(base)}</b>{base_name}" + expression_hint(expression),
+        "",
+    ]
 
     values = [fmt_money(conv.result, conv.quote, prefs) for conv in conversions]
     value_width = max((len(v) for v in values), default=0)
@@ -213,7 +224,8 @@ def render_multi(
         quote_meta = cur_mod.get(conv.quote)
         flag = quote_meta.flag or "▫️"
         cell = f"{conv.quote.ljust(code_width)}  {value.rjust(value_width)}"
-        lines.append(f"{flag} <code>{esc(cell)}</code>")
+        name = f"  {esc(currency_name(conv.quote, lang))}" if prefs.show_names else ""
+        lines.append(f"{flag} <code>{esc(cell)}</code>{name}")
 
     missing_list = [code for code in missing]
     if missing_list:

@@ -96,6 +96,8 @@ class Config:
     max_favorites: int = field(default_factory=lambda: _env_int("MAX_FAVORITES", 20))
     default_lang: str = field(default_factory=lambda: _env_str("DEFAULT_LANG", "zh"))
     default_decimals: int = field(default_factory=lambda: _env_int("DEFAULT_DECIMALS", 2))
+    # 换算结果里是否给每个货币标上中文名（英文界面则标英文名）
+    default_show_names: bool = field(default_factory=lambda: _env_bool("DEFAULT_SHOW_NAMES", True))
     default_tz: str = field(default_factory=lambda: _env_str("DEFAULT_TZ", "Asia/Shanghai"))
 
     # --- 可选的付费数据源 ---

@@ -189,14 +189,16 @@ class Scheduler:
             "",
             f"{base_meta.flag} <b>1 {fmt.esc(sub.base)}</b> =",
         ]
-        for conv in conversions:
+        rates_text = [fmt.fmt_rate(conv.rate.value, prefs) for conv in conversions]
+        width = max((len(r) for r in rates_text), default=0)
+        code_width = max((len(conv.quote) for conv in conversions), default=3)
+        for conv, rate_text in zip(conversions, rates_text):
             quote_meta = cur_mod.get(conv.quote)
+            cell = f"{conv.quote.ljust(code_width)}  {rate_text.rjust(width)}"
+            name = f"  {fmt.esc(fmt.currency_name(conv.quote, prefs.lang))}" if prefs.show_names else ""
             change = self.rates.change_percent(sub.base, conv.quote)
-            change_text = f"　{fmt.fmt_change(change, prefs.lang)}" if change is not None else ""
-            lines.append(
-                f"{quote_meta.flag} <code>{fmt.esc(conv.quote)}</code>  "
-                f"<b>{fmt.esc(fmt.fmt_rate(conv.rate.value, prefs))}</b>{fmt.esc(change_text)}"
-            )
+            change_text = f"  {fmt.fmt_change(change, prefs.lang)}" if change is not None else ""
+            lines.append(f"{quote_meta.flag} <code>{fmt.esc(cell)}</code>{name}{fmt.esc(change_text)}")
         if missing:
             lines.append(f"<i>⚠️ {fmt.esc('/'.join(missing))}</i>")
         lines.append("")

@@ -167,6 +167,9 @@ def settings_keyboard(prefs: UserPrefs) -> InlineKeyboardMarkup:
         ),
     )
     builder.row(
+        InlineKeyboardButton(
+            text=f"🏷 {on if prefs.show_names else off}", callback_data=pack("st", "nam")
+        ),
         InlineKeyboardButton(text="🌐 中文 / English", callback_data=pack("st", "lang")),
     )
     builder.row(InlineKeyboardButton(text=t(lang, "btn_close"), callback_data=pack("close")))

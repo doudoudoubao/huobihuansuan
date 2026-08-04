@@ -38,6 +38,7 @@ def settings_text(prefs: UserPrefs) -> str:
         t(lang, "settings_group", state=on if prefs.group_sep else off),
         t(lang, "settings_source", state=on if prefs.show_source else off),
         t(lang, "settings_change", state=on if prefs.show_change else off),
+        t(lang, "settings_names", state=on if prefs.show_names else off),
         t(lang, "settings_lang", name="中文" if lang == "zh" else "English"),
         t(lang, "settings_tz", tz=fmt.esc(prefs.tz)),
     ]
@@ -259,7 +260,12 @@ async def cb_settings(
         await query.answer()
         return
 
-    toggles = {"grp": "group_sep", "src": "show_source", "chg": "show_change"}
+    toggles = {
+        "grp": "group_sep",
+        "src": "show_source",
+        "chg": "show_change",
+        "nam": "show_names",
+    }
     if action in toggles:
         field = toggles[action]
         prefs = await db.update_prefs(prefs.user_id, **{field: not getattr(prefs, field)})

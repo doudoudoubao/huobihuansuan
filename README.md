@@ -28,24 +28,27 @@
 **只发金额时**（`100rmb`、`100`）直接铺开一屏常用货币，数值右对齐、一眼扫完：
 
 ```
-🇨🇳 100 CNY
+🇨🇳 100 CNY  人民币
 
-🇺🇸 USD   13.81
-🇭🇰 HKD  107.83
-🇪🇺 EUR   12.72
-🇯🇵 JPY   2,172
-🇰🇷 KRW  19,087
+🇺🇸 USD   13.81  美元
+🇭🇰 HKD  107.83  港币
+🇪🇺 EUR   12.72  欧元
+🇯🇵 JPY   2,172  日元
+🇰🇷 KRW  19,087  韩元
+🇹🇼 TWD  447.46  新台币
 ───────────────
 📡 yahoo · 刚刚
 [🇺🇸USD] [🇭🇰HKD] [🇪🇺EUR] [🇯🇵JPY]
 [🔄 刷新] [⭐ 常用] [✖️ 关闭]
 ```
 
+不想看中文名可以 `/settings` 里关掉（🏷 那个开关），只留代码。
+
 **写明目标货币时**（`100 usd cny`）给单对详情卡，只有结果加粗，视线一落就看到答案：
 
 ```
-🇺🇸 100 USD
-🇨🇳 724.31 CNY          ← 加粗
+🇺🇸 100 USD  美元
+🇨🇳 724.31 CNY  人民币      ← 只有这行加粗
 
 1 USD = 7.2431 CNY
 1 CNY = 0.1381 USD
@@ -106,6 +109,7 @@
 /fav                       常用币种面板（见上）
 /fee 2                     默认手续费，之后每次换算自动带上；/fee off 关闭
 /decimals 2                小数位
+/settings 里的 🏷 开关       货币中文名的显示 / 隐藏
 /lang                      中 / 英切换
 /settings                  图形化设置面板
 ```
@@ -406,6 +410,7 @@ TELEGRAM_PROXY=http://127.0.0.1:7890        # 或 socks5://127.0.0.1:1080
 | `DEFAULT_FAVORITES` | 10 个主流货币 | 新用户的常用列表 |
 | `MULTI_TARGET_COUNT` | `10` | 只发金额时一次列几行 |
 | `MAX_FAVORITES` | `20` | 每个用户最多收藏几个 |
+| `DEFAULT_SHOW_NAMES` | `1` | 结果里是否标货币中文名 |
 | `DISABLED_PROVIDERS` | 空 | 逗号分隔，禁用指定数据源 |
 | `TELEGRAM_PROXY` | 空 | 访问 api.telegram.org 的代理，支持 http / socks5 |
 | `WEBHOOK_BASE` | 空 | 留空走长轮询；填了就切 webhook |
@@ -425,7 +430,7 @@ bot/
 ├── i18n.py           中英文案表
 ├── keyboards.py      Inline 键盘与 callback_data 编解码
 ├── chart.py          走势图渲染（matplotlib 可选）
-├── db.py             SQLite：偏好 / 提醒 / 订阅 / 使用统计
+├── db.py             SQLite：偏好 / 提醒 / 订阅 / 使用统计（含自动补列迁移）
 ├── middlewares.py    偏好注入 + 限流
 ├── scheduler.py      提醒巡检 + 每日播报
 ├── main.py           装配与启动（长轮询 / webhook）

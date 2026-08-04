@@ -164,3 +164,49 @@ async def test_card_has_a_footer_rule(prefs, rates):
     rendered = await respond_to_text("100 usd cny", prefs, rates)
     assert RULE in rendered.text
     assert rendered.text.rstrip().endswith("</i>")   # 页脚是最后一行
+
+
+# --- 货币中文名 ---------------------------------------------------------------
+
+
+async def test_names_are_shown_by_default(prefs, rates):
+    prefs.show_names = True
+    rendered = await respond_to_text("100", prefs, rates)
+    for name in ("美元", "欧元", "日元"):
+        assert name in rendered.text
+
+
+async def test_names_sit_outside_the_code_block(prefs, rates):
+    """中文在等宽字体里的宽度各客户端不一，塞进 <code> 会把数字列顶歪。"""
+    prefs.show_names = True
+    rendered = await respond_to_text("100", prefs, rates)
+    for cell in _code_cells(rendered.text):
+        assert not any("一" <= ch <= "鿿" for ch in cell), cell
+
+
+async def test_names_do_not_break_alignment(prefs, rates):
+    prefs.show_names = True
+    rendered = await respond_to_text("100", prefs, rates)
+    cells = _code_cells(rendered.text)
+    assert len({len(cell) for cell in cells}) == 1, cells
+
+
+async def test_names_can_be_turned_off(prefs, rates):
+    prefs.show_names = False
+    rendered = await respond_to_text("100", prefs, rates)
+    assert "美元" not in rendered.text
+    assert "USD" in rendered.text
+
+
+async def test_single_card_names_both_sides(prefs, rates):
+    prefs.show_names = True
+    rendered = await respond_to_text("100 usd cny", prefs, rates)
+    assert "美元" in rendered.text and "人民币" in rendered.text
+
+
+async def test_english_locale_uses_english_names(prefs, rates):
+    prefs.lang = "en"
+    prefs.show_names = True
+    rendered = await respond_to_text("100 usd cny", prefs, rates)
+    assert "US Dollar" in rendered.text and "Chinese Yuan" in rendered.text
+    assert "美元" not in rendered.text

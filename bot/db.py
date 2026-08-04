@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -12,6 +13,8 @@ import aiosqlite
 
 from .config import Config
 from .currencies import FILLER
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -23,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
     group_sep    INTEGER NOT NULL DEFAULT 1,
     show_source  INTEGER NOT NULL DEFAULT 1,
     show_change  INTEGER NOT NULL DEFAULT 1,
+    show_names   INTEGER NOT NULL DEFAULT 1,
     tz           TEXT    NOT NULL DEFAULT 'Asia/Shanghai',
     fee_percent  TEXT    NOT NULL DEFAULT '',
     created_at   REAL    NOT NULL DEFAULT 0,
@@ -69,6 +73,15 @@ CREATE TABLE IF NOT EXISTS usage (
 """
 
 
+#: 后来新增的列。key 是表名，value 是 {列名: 列定义}。
+#: 新加字段时同时改 SCHEMA 和这里，老库才不会缺列。
+MIGRATIONS: dict[str, dict[str, str]] = {
+    "users": {
+        "show_names": "INTEGER NOT NULL DEFAULT 1",
+    },
+}
+
+
 @dataclass(slots=True)
 class UserPrefs:
     user_id: int
@@ -79,6 +92,7 @@ class UserPrefs:
     group_sep: bool = True
     show_source: bool = True
     show_change: bool = True
+    show_names: bool = True
     tz: str = "Asia/Shanghai"
     fee_percent: Decimal | None = None
 
@@ -173,7 +187,25 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """给已存在的表补上后来新增的列。
+
+        SCHEMA 里用的是 CREATE TABLE IF NOT EXISTS，老库不会因此拿到新字段，
+        所以每次启动都对照一遍，缺哪列补哪列。SQLite 的 ADD COLUMN 是常数时间，
+        没有性能负担。
+        """
+        for table, columns in MIGRATIONS.items():
+            async with self.conn.execute(f"PRAGMA table_info({table})") as cursor:
+                existing = {row["name"] for row in await cursor.fetchall()}
+            if not existing:
+                continue  # 表还不存在，SCHEMA 已经按最新定义建好了
+            for column, ddl in columns.items():
+                if column not in existing:
+                    log.info("数据库迁移：给 %s 补上 %s 列", table, column)
+                    await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     async def close(self) -> None:
         if self._conn:
@@ -199,6 +231,7 @@ class Database:
             group_sep=bool(row["group_sep"]),
             show_source=bool(row["show_source"]),
             show_change=bool(row["show_change"]),
+            show_names=bool(row["show_names"]),
             tz=row["tz"],
             fee_percent=_dec(row["fee_percent"]),
         )
@@ -215,6 +248,7 @@ class Database:
                 base=self.config.default_base,
                 favorites=list(self.config.default_favorites),
                 decimals=self.config.default_decimals,
+                show_names=self.config.default_show_names,
                 tz=self.config.default_tz,
             )
             await self.save_prefs(prefs)
@@ -228,17 +262,20 @@ class Database:
         await self.conn.execute(
             """
             INSERT INTO users (user_id, lang, base, favorites, decimals, group_sep,
-                               show_source, show_change, tz, fee_percent, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                               show_source, show_change, show_names, tz, fee_percent,
+                               created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(user_id) DO UPDATE SET
                 lang=excluded.lang, base=excluded.base, favorites=excluded.favorites,
                 decimals=excluded.decimals, group_sep=excluded.group_sep,
                 show_source=excluded.show_source, show_change=excluded.show_change,
-                tz=excluded.tz, fee_percent=excluded.fee_percent, updated_at=excluded.updated_at
+                show_names=excluded.show_names, tz=excluded.tz,
+                fee_percent=excluded.fee_percent, updated_at=excluded.updated_at
             """,
             (
                 prefs.user_id, prefs.lang, prefs.base.upper(), ",".join(prefs.favorites),
-                prefs.decimals, int(prefs.group_sep), int(prefs.show_source), int(prefs.show_change),
+                prefs.decimals, int(prefs.group_sep), int(prefs.show_source),
+                int(prefs.show_change), int(prefs.show_names),
                 prefs.tz, str(prefs.fee_percent or ""), now, now,
             ),
         )
