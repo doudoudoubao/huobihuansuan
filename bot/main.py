@@ -174,7 +174,11 @@ async def run(cfg: Config | None = None) -> None:
             await _run_webhook(bot, dp, cfg)
         else:
             await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            # 只订阅用得上的类型。打出来是为了排查「inline 没反应」这类问题时，
+            # 一眼就能确认 inline_query 到底有没有在订阅列表里。
+            updates = dp.resolve_used_update_types()
+            log.info("开始轮询，订阅的更新类型：%s", ", ".join(updates))
+            await dp.start_polling(bot, allowed_updates=updates)
     finally:
         log.info("正在退出……")
         await scheduler.stop()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
@@ -43,15 +44,36 @@ def _article(
     )
 
 
+async def _reply(
+    query: InlineQuery, articles: list[InlineQueryResultArticle], *, cache_time: int
+) -> None:
+    """统一出口：把结果发出去，成败都留下日志。
+
+    inline 出问题时用户那边只是「没反应」，没有任何提示，日志是唯一线索。
+    所以「收到什么」「答了几条」「被 API 回绝的原因」三样都得能在 logs 里看到 ——
+    少一样，就分不清是更新没送达、还是送达了但结果包被 Telegram 拒收。
+    """
+    try:
+        await query.answer(articles, cache_time=cache_time, is_personal=True)
+    except TelegramAPIError as exc:
+        log.error(
+            "inline 结果被 Telegram 回绝（%d 条，query=%r）：%s", len(articles), query.query, exc
+        )
+        return
+    log.info("inline 已应答 %d 条：query=%r", len(articles), query.query)
+
+
 @router.inline_query()
 async def on_inline(
     query: InlineQuery, prefs: UserPrefs, rates: RateService, config: Config
 ) -> None:
     text = (query.query or "").strip()
     lang = prefs.lang
+    log.info("收到 inline 查询：from=%s query=%r", query.from_user.id, text)
 
     if not text:
-        await query.answer(
+        await _reply(
+            query,
             [
                 _article(
                     "empty",
@@ -61,16 +83,15 @@ async def on_inline(
                 )
             ],
             cache_time=30,
-            is_personal=True,
         )
         return
 
     parsed = parse(text, context_currency=prefs.base)
     if parsed.error or not parsed.is_actionable:
-        await query.answer(
+        await _reply(
+            query,
             [_article("nomatch", t(lang, "no_match").split("\n")[0], text, t(lang, "no_match"))],
             cache_time=10,
-            is_personal=True,
         )
         return
 
@@ -107,10 +128,10 @@ async def on_inline(
         )
 
     if not articles:
-        await query.answer(
+        await _reply(
+            query,
             [_article("unavailable", t(lang, "unavailable", code=source).replace("<b>", "").replace("</b>", ""), "", t(lang, "unavailable", code=source))],
             cache_time=10,
-            is_personal=True,
         )
         return
 
@@ -134,4 +155,4 @@ async def on_inline(
             ),
         )
 
-    await query.answer(articles[:MAX_RESULTS + 1], cache_time=15, is_personal=True)
+    await _reply(query, articles[:MAX_RESULTS + 1], cache_time=15)
