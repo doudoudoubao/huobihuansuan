@@ -12,6 +12,7 @@ from bot.rates.providers import (
     FrankfurterProvider,
     OkxProvider,
     OpenErApiProvider,
+    SinaProvider,
     YahooFinanceProvider,
 )
 
@@ -315,77 +316,6 @@ async def test_stale_cache_entries_are_dropped():
     assert "CNY" not in quotes                  # 过期就别再拿出来充数
 
 
-# --- Stooq：一次请求拿一批，天然不撞限流 --------------------------------------
-
-
-class TextHttp(HttpClient):
-    """返回预置文本的假客户端，记录每次请求的参数。"""
-
-    def __init__(self, body: str = "") -> None:
-        super().__init__()
-        self.body = body
-        self.calls: list[dict] = []
-
-    async def get_text(self, url, *, params=None, retries=1, headers=None, tolerate_error=False):  # type: ignore[override]
-        self.calls.append({"url": url, "params": params or {}})
-        return self.body
-
-
-STOOQ_CSV = """Symbol,Date,Time,Open,High,Low,Close,Volume
-USDCNY,2026-08-04,15:30:00,7.2400,7.2450,7.2380,7.2431,0
-USDJPY,2026-08-04,15:30:00,157.10,157.40,157.00,157.3200,0
-EURUSD,2026-08-04,15:30:00,1.0890,1.0902,1.0880,1.0851,0
-USDXXX,N/D,N/D,N/D,N/D,N/D,N/D,N/D
-"""
-
-
-async def test_stooq_parses_close_column():
-    from bot.rates.providers import StooqProvider
-
-    http = TextHttp(STOOQ_CSV)
-    result = await StooqProvider(http).fetch(wanted=["CNY", "JPY", "EUR"])
-    assert result.quotes["CNY"] == Decimal("7.2431")
-    assert result.quotes["JPY"] == Decimal("157.3200")
-    assert result.quotes["USD"] == Decimal(1)
-
-
-async def test_stooq_inverts_majors_quoted_against_usd():
-    """EURUSD 报的是 1 EUR = N USD，要倒过来才是「1 USD 换多少欧元」。"""
-    from bot.rates.providers import StooqProvider
-
-    http = TextHttp(STOOQ_CSV)
-    result = await StooqProvider(http).fetch(wanted=["EUR"])
-    assert result.quotes["EUR"] == Decimal(1) / Decimal("1.0851")
-    assert StooqProvider.symbol_for("EUR") == ("eurusd", True)
-    assert StooqProvider.symbol_for("CNY") == ("usdcny", False)
-
-
-async def test_stooq_skips_unavailable_rows():
-    from bot.rates.providers import StooqProvider
-
-    http = TextHttp(STOOQ_CSV)
-    result = await StooqProvider(http).fetch(wanted=["CNY"])
-    assert "XXX" not in result.quotes     # N/D 的行直接跳过
-
-
-async def test_stooq_batches_many_pairs_into_few_requests():
-    """一次请求拿一批，正是它比 Yahoo 抗限流的原因。"""
-    from bot.rates.providers import StooqProvider
-
-    http = TextHttp(STOOQ_CSV)
-    await StooqProvider(http).fetch()
-    # 二十多个货币，请求数应该是个位数，而不是每个符号一次
-    assert len(http.calls) <= 3
-    assert "+" in http.calls[0]["params"]["s"]
-
-
-async def test_stooq_raises_when_nothing_parses():
-    from bot.rates.providers import StooqProvider
-
-    with pytest.raises(ProviderError, match="stooq"):
-        await StooqProvider(TextHttp("Symbol,Date,Time,Open,High,Low,Close,Volume\n")).fetch()
-
-
 # --- Yahoo 的访问凭证 ---------------------------------------------------------
 
 
@@ -443,3 +373,96 @@ async def test_yahoo_survives_a_failed_crumb_fetch():
     result = await provider.fetch()
     assert result.quotes["CNY"] == Decimal("7.2")
     assert provider._crumb == ""
+
+
+# --- 新浪财经 -----------------------------------------------------------------
+#
+# 下面 CNY / JPY 两条是从生产服务器上取回的**真实响应**，一个字符没改。
+# 字段位置就是照它对出来的：[0] 时间、[6] 最高、[7] 最低、[8] 最新价、[9] 名称、[-1] 日期。
+
+SINA_REAL = (
+    'var hq_str_fx_susdcny="23:04:41,6.7511000000,6.7531000000,6.7560000000,228.0000000000,'
+    '6.7464000000,6.7580000000,6.7352000000,6.7521000000,在岸人民币,-0.0577,-0.0039,0.0228,'
+    '此行情由新浪财经计算得出,0.0000,0.0000,,2026-08-04";\n'
+    'var hq_str_fx_susdjpy="23:06:18,157.560000,157.580000,157.160000,8000,157.170000,'
+    '157.950000,157.150000,157.560000,美元兑日元即期汇率,0.250000,0.400000,0.00509,,'
+    '163.980000,152.100000,,2026-08-04";\n'
+    'var hq_str_fx_seurusd="23:06:20,1.0890,1.0892,1.0888,0,1.0889,1.0902,1.0880,1.0891,'
+    '欧元兑美元,0.1,0.1,0.01,,1.12,1.02,,2026-08-04";\n'
+)
+
+
+class SinaHttp(HttpClient):
+    def __init__(self, body: str = SINA_REAL) -> None:
+        super().__init__()
+        self.body = body
+        self.urls: list[str] = []
+        self.headers: list[dict | None] = []
+
+    async def get_text(self, url, *, params=None, retries=1, headers=None, tolerate_error=False):  # type: ignore[override]
+        self.urls.append(url)
+        self.headers.append(headers)
+        return self.body
+
+
+async def test_sina_reads_the_last_price_field():
+    """[8] 是最新价——这个位置是照真实响应对出来的，不是猜的。"""
+    result = await SinaProvider(SinaHttp()).fetch(wanted=["CNY", "JPY"])
+    assert result.quotes["CNY"] == Decimal("6.7521000000")
+    assert result.quotes["JPY"] == Decimal("157.560000")
+
+
+async def test_sina_inverts_majors():
+    result = await SinaProvider(SinaHttp()).fetch(wanted=["EUR"])
+    assert result.quotes["EUR"] == Decimal(1) / Decimal("1.0891")
+    assert SinaProvider.symbol_for("EUR") == ("eurusd", True)
+    assert SinaProvider.symbol_for("CNY") == ("usdcny", False)
+
+
+async def test_sina_batches_everything_into_one_request():
+    """一次请求覆盖二十多个法币，这正是它不会像 Yahoo 那样撞限流的原因。"""
+    http = SinaHttp()
+    await SinaProvider(http).fetch()
+    assert len(http.urls) == 1
+    assert http.urls[0].count("fx_s") > 15
+
+
+async def test_sina_sends_the_required_referer():
+    """少了 Referer 新浪会拒绝。"""
+    http = SinaHttp()
+    await SinaProvider(http).fetch(wanted=["CNY"])
+    assert "sina.com.cn" in (http.headers[0] or {}).get("Referer", "")
+
+
+async def test_sina_rejects_prices_outside_the_day_range():
+    """字段一旦挪位，宁可这条不出数，也不能发出错的汇率。
+
+    构造一条「最新价」跑到当日高低区间之外的记录——那说明我们读错了列。
+    """
+    broken = (
+        'var hq_str_fx_susdcny="10:00:00,6.75,6.75,6.75,0,6.75,'
+        '6.7580,6.7352,99.9999,在岸人民币,0,0,0,,0,0,,2026-08-04";\n'
+    )
+    with pytest.raises(ProviderError, match="sina"):
+        await SinaProvider(SinaHttp(broken)).fetch(wanted=["CNY"])
+
+
+async def test_sina_uses_the_quote_timestamp():
+    """行情自带北京时间，直接拿来当 as_of，比用「现在」诚实。"""
+    import datetime as dt
+
+    result = await SinaProvider(SinaHttp()).fetch(wanted=["CNY", "JPY", "EUR"])
+    moment = dt.datetime.fromtimestamp(result.as_of, dt.timezone(dt.timedelta(hours=8)))
+    assert moment.strftime("%Y-%m-%d %H:%M:%S") == "2026-08-04 23:06:20"
+
+
+async def test_sina_skips_unknown_symbols_without_failing():
+    """新浪没有的货币对不会返回，剩下的照常用，缺的自然落到下一个源。"""
+    result = await SinaProvider(SinaHttp()).fetch(wanted=["CNY", "MOP", "LAK"])
+    assert "CNY" in result.quotes
+    assert "MOP" not in result.quotes and "LAK" not in result.quotes
+
+
+async def test_sina_raises_when_nothing_parses():
+    with pytest.raises(ProviderError, match="sina 无可用报价"):
+        await SinaProvider(SinaHttp("")).fetch(wanted=["CNY"])

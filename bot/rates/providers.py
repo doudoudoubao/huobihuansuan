@@ -3,7 +3,8 @@
 全部统一输出「1 USD = X 单位目标货币」的映射，方便服务层合并。
 优先级（priority 越小越先采用）：
 
-    法币  Yahoo 10 → Stooq 15（均准实时）→ Frankfurter/ECB 30 → open.er-api 40 → currency-api 50
+    法币  Yahoo 10 → 新浪 12 → fxratesapi 20（均准实时）
+          → Frankfurter/ECB 30 → open.er-api 40 → currency-api 50
     加密  Binance 10 → OKX 20（均准实时）→ CoinGecko 40 → currency-api 50
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -174,28 +176,43 @@ class CurrencyApiProvider(RateProvider):
         return series
 
 
-class StooqProvider(RateProvider):
-    """Stooq 的 CSV 行情：免费、免鉴权，而且**一次请求能拿一批货币对**。
+class SinaProvider(RateProvider):
+    """新浪财经外汇行情：免费、免鉴权、秒级更新，**一次请求能拿一批**。
 
-    这一点很关键 —— Yahoo 每个符号都要单独发一次请求，很容易被反爬判成
-    高频访问；Stooq 一次 20 对只发一个请求，天然不会撞限流。
+    在真机上探过：`https://hq.sinajs.cn/list=fx_susdcny,fx_susdjpy,...` 返回
+    200 且带实时价，几百毫秒。相比之下 Yahoo 每个符号一次请求还要过反爬，
+    Stooq 整站上了 JS 挑战 —— 这个接口朴素得多，也就稳得多。
+
+    返回形如（GBK 编码）::
+
+        var hq_str_fx_susdcny="23:04:41,6.7511,6.7531,6.7560,228.0,6.7464,
+        6.7580,6.7352,6.7521,在岸人民币,...,2026-08-04";
+
+    字段位置按真实响应对齐：[0] 时间、[6] 最高、[7] 最低、[8] 最新价、
+    [9] 名称、[-1] 日期。取 [8]，并用 [7] ≤ [8] ≤ [6] 做一次校验 ——
+    万一哪天字段挪位了，宁可这一条不出数，也不能发出错的汇率。
     """
 
-    name = "stooq"
+    name = "sina"
     kind = "fiat"
     cadence = "realtime"
-    priority = 15  # 仅次于 Yahoo，排在每日源前面
+    priority = 12  # Yahoo 之后、每日源之前
     supports_history = False
 
-    URL = "https://stooq.com/q/l/"
-    CHUNK = 20
+    URL = "https://hq.sinajs.cn/list="
+    HEADERS = {"Referer": "https://finance.sina.com.cn"}
+    CHUNK = 30
 
     #: 外汇市场习惯用 XXX/USD 报价的货币，取到的价要倒过来用
     INVERTED = frozenset({"EUR", "GBP", "AUD", "NZD"})
 
+    LINE_RE = re.compile(r'hq_str_fx_s(\w+)="([^"]*)"')
+
+    IDX_HIGH, IDX_LOW, IDX_LAST, IDX_NAME = 6, 7, 8, 9
+
     @classmethod
     def symbol_for(cls, code: str) -> tuple[str, bool]:
-        """返回 (stooq 符号, 是否需要取倒数)。"""
+        """返回 (新浪的符号后缀, 是否需要取倒数)。"""
         lower = code.lower()
         if code in cls.INVERTED:
             return f"{lower}usd", True
@@ -207,53 +224,95 @@ class StooqProvider(RateProvider):
             for c in {x.upper() for x in (wanted or ())} | set(cur_mod.FILLER) | set(cur_mod.POPULAR)
             if c in cur_mod.FIAT_CODES and c != "USD"
         )
-        quotes: dict[str, Decimal] = {"USD": Decimal(1)}
-        errors: list[str] = []
+        symbols = {}
+        for code in codes:
+            suffix, invert = self.symbol_for(code)
+            symbols[suffix] = (code, invert)
 
-        for start in range(0, len(codes), self.CHUNK):
-            chunk = codes[start : start + self.CHUNK]
-            symbols = {}
-            for code in chunk:
-                symbol, invert = self.symbol_for(code)
-                symbols[symbol] = (code, invert)
+        quotes: dict[str, Decimal] = {"USD": Decimal(1)}
+        newest = 0.0
+        errors: list[str] = []
+        keys = list(symbols)
+
+        for start in range(0, len(keys), self.CHUNK):
+            chunk = keys[start : start + self.CHUNK]
+            # list= 的取值要原样拼进 URL，交给 params 会把逗号编码掉
+            url = self.URL + ",".join(f"fx_s{k}" for k in chunk)
             try:
-                text = await self.http.get_text(
-                    self.URL,
-                    params={"s": "+".join(symbols), "f": "sd2t2ohlcv", "h": "", "e": "csv"},
-                    retries=1,
-                )
+                text = await self.http.get_text(url, headers=self.HEADERS, retries=1)
             except Exception as exc:  # noqa: BLE001
                 errors.append(str(exc))
                 continue
-            quotes.update(self._parse_csv(text, symbols))
-            if start + self.CHUNK < len(codes):
-                await asyncio.sleep(0.5)  # 两批之间喘口气
+            parsed, seen_at = self._parse(text, symbols)
+            quotes.update(parsed)
+            newest = max(newest, seen_at)
+            if start + self.CHUNK < len(keys):
+                await asyncio.sleep(0.3)
 
-        # 部分成功也算数：拿到几个用几个，缺的货币会自然落到下一优先级的源
+        # 部分成功也算数：拿到几个用几个，缺的自然落到下一优先级的源
         if len(quotes) < 2:
-            raise ProviderError(f"stooq 无可用报价{'：' + errors[0] if errors else ''}")
-        return ProviderResult(self.name, quotes, note="realtime")
+            raise ProviderError(f"sina 无可用报价{'：' + errors[0] if errors else ''}")
+        return ProviderResult(
+            self.name, quotes, as_of=newest or time.time(), note="realtime"
+        )
 
-    @staticmethod
-    def _parse_csv(text: str, symbols: dict[str, tuple[str, bool]]) -> dict[str, Decimal]:
-        """CSV 形如 `Symbol,Date,Time,Open,High,Low,Close,Volume`，取 Close 列。
-
-        拿不到行情的符号各列会是 N/D，跳过即可。
-        """
+    @classmethod
+    def _parse(cls, text: str, symbols: dict[str, tuple[str, bool]]) -> tuple[dict[str, Decimal], float]:
         out: dict[str, Decimal] = {}
-        for line in text.strip().splitlines()[1:]:  # 第一行是表头
-            fields = [f.strip() for f in line.split(",")]
-            if len(fields) < 7:
-                continue
-            entry = symbols.get(fields[0].lower())
+        newest = 0.0
+        for suffix, payload in cls.LINE_RE.findall(text):
+            entry = symbols.get(suffix.lower())
             if entry is None:
                 continue
             code, invert = entry
-            close = to_decimal(fields[6])
-            if close is None:  # N/D 或异常值
+            fields = payload.split(",")
+            if len(fields) <= cls.IDX_NAME:
                 continue
-            out[code] = (Decimal(1) / close) if invert else close
-        return out
+            last = to_decimal(fields[cls.IDX_LAST])
+            high = to_decimal(fields[cls.IDX_HIGH])
+            low = to_decimal(fields[cls.IDX_LOW])
+            if last is None:
+                continue
+            # 字段一旦挪位，宁可这条不出数，也不能发出错的汇率
+            if high is not None and low is not None and not (low <= last <= high):
+                log.warning("sina %s 的最新价 %s 不在 [%s, %s] 区间内，跳过", code, last, low, high)
+                continue
+            out[code] = (Decimal(1) / last) if invert else last
+            newest = max(newest, cls._timestamp(fields))
+        return out, newest
+
+    @staticmethod
+    def _timestamp(fields: list[str]) -> float:
+        """行情自带的时间（北京时间），拿不到就返回 0 交给调用方兜底。"""
+        try:
+            moment = datetime.strptime(f"{fields[-1]} {fields[0]}", "%Y-%m-%d %H:%M:%S")
+            return moment.replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+        except (ValueError, IndexError):
+            return 0.0
+
+
+class FxRatesApiProvider(RateProvider):
+    """fxratesapi.com：真机上探到 200 / 48ms，免鉴权，作为实时法币的第二备份。"""
+
+    name = "fxratesapi"
+    kind = "fiat"
+    cadence = "realtime"
+    priority = 20
+
+    async def fetch(self, wanted: Iterable[str] | None = None) -> ProviderResult:
+        data = await self.http.get_json("https://api.fxratesapi.com/latest", params={"base": "USD"})
+        if data.get("success") is False:
+            raise ProviderError(f"fxratesapi 返回失败：{str(data.get('error'))[:80]}")
+        quotes: dict[str, Decimal] = {"USD": Decimal(1)}
+        for code, value in (data.get("rates") or {}).items():
+            dec = to_decimal(value)
+            if dec is not None and cur_mod.is_known(code.upper()):
+                quotes[code.upper()] = dec
+        if len(quotes) < 20:
+            raise ProviderError("fxratesapi 返回数据过少")
+        return ProviderResult(
+            self.name, quotes, as_of=float(data.get("timestamp") or time.time()), note="realtime"
+        )
 
 
 class YahooFinanceProvider(RateProvider):
@@ -632,7 +691,8 @@ def _parse_date_ts(value: Any) -> float:
 
 ALL_PROVIDER_CLASSES: tuple[type[RateProvider], ...] = (
     YahooFinanceProvider,
-    StooqProvider,
+    SinaProvider,
+    FxRatesApiProvider,
     BinanceProvider,
     OkxProvider,
     FrankfurterProvider,

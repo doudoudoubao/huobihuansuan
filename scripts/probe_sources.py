@@ -30,12 +30,7 @@ UA = (
 
 #: (分组, 名称, URL, 额外请求头, 说明)
 CANDIDATES: list[tuple[str, str, str, dict[str, str], str]] = [
-    # --- Stooq：上一版猜的 URL 返回了 404，这里把几种写法都试一遍 ---
-    ("stooq", "stooq-full", "https://stooq.com/q/l/?s=usdcny&f=sd2t2ohlcv&h&e=csv", {}, "带字段列表"),
-    ("stooq", "stooq-min", "https://stooq.com/q/l/?s=usdcny&e=csv", {}, "最简写法"),
-    ("stooq", "stooq-multi", "https://stooq.com/q/l/?s=usdcny+usdjpy+eurusd&f=sd2t2ohlcv&h&e=csv", {}, "一次多个"),
-    ("stooq", "stooq-pl", "https://stooq.pl/q/l/?s=usdcny&f=sd2t2ohlcv&h&e=csv", {}, "波兰站"),
-    ("stooq", "stooq-quote", "https://stooq.com/q/?s=usdcny", {}, "网页版（看是否整站可达）"),
+    # Stooq 已确认整站上了 JS 反爬、CSV 端点 404，不再探测
 
     # --- 新浪财经：国内服务器上通常最快最稳，需要 Referer ---
     ("sina", "sina-fx", "https://hq.sinajs.cn/list=fx_susdcny",

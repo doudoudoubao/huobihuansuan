@@ -172,7 +172,14 @@ class HttpClient:
                         raise ProviderError(f"{_host(url)} 请求过频被限流 (429)")
                     if resp.status >= 400 and not tolerate_error:
                         raise ProviderError(f"{_host(url)} 返回 HTTP {resp.status}")
-                    return await resp.text()
+                    # 国内的行情接口多是 GBK，逐个编码试过去，实在不行也不让它抛
+                    body = await resp.read()
+                    for encoding in (resp.charset or "utf-8", "utf-8", "gbk", "gb18030"):
+                        try:
+                            return body.decode(encoding)
+                        except (UnicodeDecodeError, LookupError):
+                            continue
+                    return body.decode("latin-1", errors="replace")
             except (aiohttp.ClientError, asyncio.TimeoutError, ProviderError) as exc:
                 last_exc = exc
                 if attempt < retries:
