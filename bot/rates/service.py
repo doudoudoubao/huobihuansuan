@@ -34,17 +34,44 @@ SNAPSHOT_KEEP = 26 * 60 * 60  # 保留 26 小时
 
 
 @dataclass(slots=True)
+class _Lookup:
+    """单个货币的最优报价来源。"""
+
+    value: Decimal
+    as_of: float
+    fetched_at: float
+    provider: str
+    cadence: str
+
+
+@dataclass(slots=True)
 class RateInfo:
     base: str
     quote: str
     value: Decimal
+    #: 报价本身对应的时间。欧洲央行这类每日源给的是当天公布时间。
     as_of: float
     sources: tuple[str, ...]
+    #: 我们上次成功抓到这份数据的时间
+    fetched_at: float = 0.0
+    #: realtime = 分钟级刷新；daily = 一天只公布一次
+    cadence: str = "realtime"
+    #: 抓取通道卡住了（不是「报价本身是昨天的」——那对每日源是正常现象）
     stale: bool = False
 
     @property
     def age(self) -> float:
+        """报价距今多久。每日源正常就有十几个小时。"""
         return max(0.0, time.time() - self.as_of)
+
+    @property
+    def fetch_age(self) -> float:
+        """我们上次成功刷新到现在多久。这个才是判断服务是否正常的依据。"""
+        return max(0.0, time.time() - (self.fetched_at or self.as_of))
+
+    @property
+    def is_daily(self) -> bool:
+        return self.cadence == "daily"
 
     @property
     def inverse(self) -> Decimal:
@@ -198,12 +225,23 @@ class RateService:
         self._last_force = now
         return await self.refresh(kinds=("fiat", "crypto", "mixed"), force=True)
 
-    def inject(self, provider: str, quotes: dict[str, Decimal], *, as_of: float | None = None) -> None:
+    def inject(
+        self,
+        provider: str,
+        quotes: dict[str, Decimal],
+        *,
+        as_of: float | None = None,
+        fetched_at: float | None = None,
+    ) -> None:
         """直接写入一份报价表。
 
         供测试与离线演示使用，也可用于接入自建行情源。
+        `as_of` 是报价本身的时间，`fetched_at` 是抓取时间；判断「卡住了」看后者。
         """
-        self._results[provider] = ProviderResult(provider, dict(quotes), as_of=as_of or time.time())
+        now = time.time()
+        self._results[provider] = ProviderResult(
+            provider, dict(quotes), as_of=as_of or now, fetched_at=fetched_at or now
+        )
         self._record_snapshot()
         self._ready.set()
 
@@ -228,22 +266,35 @@ class RateService:
                 return provider.priority
         return 999
 
-    def _lookup(self, code: str) -> tuple[Decimal, float, str] | None:
-        """返回 (1 USD 对应的数量, 数据时间, 数据源)。"""
+    def _cadence(self, name: str) -> str:
+        for provider in self._providers:
+            if provider.name == name:
+                return provider.cadence
+        return "daily"
+
+    def _lookup(self, code: str) -> _Lookup | None:
+        """挑出该货币当前最优的报价。"""
         code = code.upper()
+        now = time.time()
         if code == "USD":
-            return Decimal(1), time.time(), "identity"
-        best: tuple[int, float, Decimal, str] | None = None
+            return _Lookup(Decimal(1), now, now, "identity", "realtime")
+        best: _Lookup | None = None
+        best_key: tuple[int, float] | None = None
         for name, result in self._results.items():
             value = result.quotes.get(code)
             if value is None:
                 continue
             key = (self._priority(name), -result.as_of)
-            if best is None or key < (best[0], -best[1]):
-                best = (self._priority(name), result.as_of, value, name)
-        if best is None:
-            return None
-        return best[2], best[1], best[3]
+            if best_key is None or key < best_key:
+                best_key = key
+                best = _Lookup(
+                    value,
+                    result.as_of,
+                    result.fetched_at or result.as_of,
+                    name,
+                    self._cadence(name),
+                )
+        return best
 
     def has(self, code: str) -> bool:
         return self._lookup(code) is not None
@@ -262,18 +313,24 @@ class RateService:
         dst = self._lookup(quote)
         if dst is None:
             raise RateUnavailable(quote)
-        if src[0] == 0:
+        if src.value == 0:
             raise RateUnavailable(base)
-        value = dst[0] / src[0]
-        as_of = min(src[1], dst[1])
-        sources = tuple(sorted({src[2], dst[2]} - {"identity"})) or ("identity",)
+        value = dst.value / src.value
+        sources = tuple(sorted({src.provider, dst.provider} - {"identity"})) or ("identity",)
+        fetched_at = min(src.fetched_at, dst.fetched_at)
+        # 两条腿里只要有一条来自每日源，整个汇率的时效性就由它决定
+        cadence = "daily" if "daily" in (src.cadence, dst.cadence) else "realtime"
         return RateInfo(
             base=base,
             quote=quote,
             value=value,
-            as_of=as_of,
+            as_of=min(src.as_of, dst.as_of),
             sources=sources,
-            stale=(time.time() - as_of) > self.config.stale_after_seconds,
+            fetched_at=fetched_at,
+            cadence=cadence,
+            # 关键：看的是「多久没抓到新数据」，不是「报价本身多老」。
+            # 欧洲央行一天只发一次，用 as_of 判断的话它永远是「过期」的。
+            stale=(time.time() - fetched_at) > self.config.stale_after_seconds,
         )
 
     def convert(
@@ -306,7 +363,7 @@ class RateService:
         for code in self.available_codes():
             found = self._lookup(code)
             if found:
-                table[code] = found[0]
+                table[code] = found.value
         self._snapshots.append((now, table))
         cutoff = now - SNAPSHOT_KEEP
         self._snapshots = [s for s in self._snapshots if s[0] >= cutoff]
@@ -428,6 +485,7 @@ class RateService:
                 "results": {
                     name: {
                         "as_of": result.as_of,
+                        "fetched_at": result.fetched_at,
                         "note": result.note,
                         "quotes": {k: str(v) for k, v in result.quotes.items()},
                     }
@@ -454,8 +512,13 @@ class RateService:
                 except ArithmeticError:
                     continue
             if quotes:
+                as_of = float(row.get("as_of") or 0)
                 self._results[name] = ProviderResult(
-                    name, quotes, as_of=float(row.get("as_of") or 0), note=row.get("note", "")
+                    name,
+                    quotes,
+                    as_of=as_of,
+                    fetched_at=float(row.get("fetched_at") or as_of),
+                    note=row.get("note", ""),
                 )
         if self._results:
             self._ready.set()

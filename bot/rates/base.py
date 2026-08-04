@@ -39,7 +39,11 @@ class Quote:
 class ProviderResult:
     provider: str
     quotes: dict[str, Decimal]
+    #: 报价本身对应的时间。每日源给的是当天的公布时间，可能是十几个小时前。
     as_of: float = field(default_factory=time.time)
+    #: 我们成功抓到这份数据的时间。判断「数据是不是卡住了」要看这个，
+    #: 而不是 as_of —— 否则每日源会被永远误判成「过期」。
+    fetched_at: float = field(default_factory=time.time)
     note: str = ""
 
     def __bool__(self) -> bool:
@@ -59,6 +63,8 @@ class RateProvider:
 
     name: str = "base"
     kind: str = "fiat"  # fiat | crypto | metal | mixed
+    #: realtime = 分钟级甚至秒级刷新；daily = 一天只公布一次（如欧洲央行）
+    cadence: str = "daily"
     priority: int = 100  # 越小越优先
     supports_history: bool = False
     #: 该源在一次 fetch 中能覆盖的货币；为空表示"未知/全量"

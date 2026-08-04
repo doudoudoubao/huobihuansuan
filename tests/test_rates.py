@@ -65,9 +65,40 @@ def test_priority_prefers_lower_number(service):
     assert "yahoo" in rate.sources
 
 
-def test_stale_flag(service):
-    service.inject("stub", USD_TABLE, as_of=time.time() - 10_000)
+def test_stale_means_fetching_is_broken_not_that_quotes_are_daily(service):
+    """欧洲央行一天只发一次价，报价「一天前」是正常的，不该报警。
+
+    以前用 as_of 判断 stale，导致任何走每日源的换算都永远显示「数据较旧」，
+    点刷新也消不掉——因为 ECB 本来就一天才更新一次。
+    """
+    # 报价是一天前的，但我们刚刚成功抓取过 → 不算异常
+    service.inject("stub", USD_TABLE, as_of=time.time() - 86_400, fetched_at=time.time())
+    rate = service.get_rate("USD", "CNY")
+    assert rate.stale is False
+    assert rate.age > 80_000        # 报价确实是旧的
+    assert rate.fetch_age < 60      # 但抓取通道是通的
+
+
+def test_stale_flag_when_fetching_actually_stops(service):
+    service.inject("stub", USD_TABLE, fetched_at=time.time() - 10_000)
     assert service.get_rate("USD", "CNY").stale is True
+
+
+def test_cadence_is_carried_through(service):
+    """两条腿里只要有一条是每日源，整个汇率就按每日源标注。"""
+    service.inject("stub", USD_TABLE)
+    assert service.get_rate("USD", "CNY").cadence == "daily"   # stub 未注册，按保守的 daily
+
+    service.inject("yahoo", {"USD": Decimal(1), "CNY": Decimal("7.2")})
+    assert service.get_rate("USD", "CNY").is_daily is False    # yahoo 是准实时源
+
+
+def test_daily_source_is_not_marked_stale_after_a_weekend(service):
+    """周末 ECB 不发布，周一早上报价可能是三天前的，依然不该报警。"""
+    service.inject("frankfurter", USD_TABLE, as_of=time.time() - 3 * 86_400)
+    rate = service.get_rate("USD", "CNY")
+    assert rate.stale is False
+    assert rate.is_daily is True
 
 
 def test_change_percent_needs_history(service):

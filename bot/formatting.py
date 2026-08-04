@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable, Sequence
 
@@ -96,6 +97,38 @@ def fmt_ago(seconds: float, lang: str) -> str:
     if seconds < 86400:
         return t(lang, "hours_ago", n=int(seconds // 3600))
     return t(lang, "days_ago", n=int(seconds // 86400))
+
+
+def fmt_duration(seconds: float, lang: str) -> str:
+    """时长，不带「前 / ago」后缀——用在「已 X 没刷新」这种句子里。"""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)} 秒" if lang == "zh" else f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟" if lang == "zh" else f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} 小时" if lang == "zh" else f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)} 天" if lang == "zh" else f"{int(seconds // 86400)}d"
+
+
+def fmt_quote_day(timestamp: float, lang: str) -> str:
+    """每日源的报价日期。说「昨天 / 8月3日」比说「23 小时前」好懂得多。"""
+    try:
+        moment = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return "—"
+    days = (datetime.now(timezone.utc).date() - moment.date()).days
+    if lang == "zh":
+        if days <= 0:
+            return "今日"
+        if days == 1:
+            return "昨日"
+        return f"{moment.month}月{moment.day}日"
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return moment.strftime("%b %d")
 
 
 def fmt_change(pct: Decimal | None, lang: str) -> str:
@@ -269,13 +302,31 @@ def render_rate(rate: RateInfo, prefs: UserPrefs, *, change_24h: Decimal | None 
 
 
 def _footer(rate: RateInfo, prefs: UserPrefs) -> str:
+    """页脚要回答的是「这个数能不能信」，分三种情况：
+
+    1. 抓取通道卡住了 —— 真出问题了，要警告
+    2. 报价来自每日源（如欧洲央行）—— 数据本来就一天一更，正常，
+       但要讲清楚是哪天的价，不能让人以为是实时的
+    3. 准实时源 —— 直接报刷新时间
+    """
     lang = prefs.lang
-    ago = fmt_ago(rate.age, lang)
+    sources = "/".join(rate.sources)
+
     if rate.stale:
-        return f"<i>⚠️ {esc(t(lang, 'stale_warn', ago=ago))}</i>"
+        # 注意：这里看的是 fetch_age（多久没刷新成功），
+        # 不是 age（报价本身多老）——每日源的 age 天然就是十几个小时。
+        return f"<i>⚠️ {esc(t(lang, 'stale_warn', ago=fmt_duration(rate.fetch_age, lang)))}</i>"
+
+    if rate.is_daily:
+        when = fmt_quote_day(rate.as_of, lang)
+        if not prefs.show_source:
+            return f"<i>🗓 {esc(when)}</i>"
+        return f"<i>🗓 {esc(t(lang, 'daily_source', sources=sources, when=when))}</i>"
+
+    ago = fmt_ago(rate.age, lang)
     if not prefs.show_source:
         return f"<i>🕒 {esc(ago)}</i>"
-    return f"<i>📡 {esc('/'.join(rate.sources))} · {esc(ago)}</i>"
+    return f"<i>📡 {esc(sources)} · {esc(ago)}</i>"
 
 
 def render_currency_list(items: Sequence[cur_mod.Currency], lang: str, *, title: str) -> str:

@@ -91,3 +91,68 @@ def test_search_ranking():
     codes = [c.code for c in cur_mod.search("韩")]
     assert "KRW" in codes
     assert [c.code for c in cur_mod.search("usd")][0] == "USD"
+
+
+# --- 页脚：区分「每日源」和「真的卡住了」 -----------------------------------
+
+
+def _rate(**kwargs):
+    from bot.rates.service import RateInfo
+    import time as _t
+
+    defaults = dict(
+        base="EUR", quote="CNY", value=Decimal("8.98"),
+        as_of=_t.time(), sources=("yahoo",), fetched_at=_t.time(),
+        cadence="realtime", stale=False,
+    )
+    return RateInfo(**{**defaults, **kwargs})
+
+
+def test_daily_source_footer_is_informative_not_alarming(prefs):
+    """欧洲央行一天一更，报价是昨天的属于正常，不该挂警告。"""
+    import time as _t
+
+    footer = fmt._footer(
+        _rate(sources=("frankfurter",), cadence="daily", as_of=_t.time() - 86_400), prefs
+    )
+    assert "⚠️" not in footer
+    assert "每日更新" in footer and "昨日" in footer
+    assert "frankfurter" in footer
+
+
+def test_realtime_source_footer_shows_age(prefs):
+    footer = fmt._footer(_rate(), prefs)
+    assert "📡" in footer and "yahoo" in footer
+    assert "⚠️" not in footer
+
+
+def test_stale_footer_reports_fetch_gap(prefs):
+    """真出问题时才警告，且说的是「多久没刷新成功」而不是「报价多老」。"""
+    import time as _t
+
+    footer = fmt._footer(_rate(stale=True, fetched_at=_t.time() - 4 * 3600), prefs)
+    assert "⚠️" in footer
+    assert "4 小时" in footer
+    assert footer.count("⚠️") == 1     # 以前模板和页脚各加一个，出现过双警告
+
+
+def test_footer_respects_show_source_toggle(prefs):
+    prefs.show_source = False
+    assert "yahoo" not in fmt._footer(_rate(), prefs)
+    assert "frankfurter" not in fmt._footer(_rate(sources=("frankfurter",), cadence="daily"), prefs)
+
+
+def test_duration_has_no_ago_suffix():
+    assert fmt.fmt_duration(4 * 3600, "zh") == "4 小时"
+    assert fmt.fmt_duration(2 * 86400, "zh") == "2 天"
+    assert "前" not in fmt.fmt_duration(90, "zh")
+    assert fmt.fmt_duration(4 * 3600, "en") == "4h"
+
+
+def test_quote_day_wording():
+    import time as _t
+
+    assert fmt.fmt_quote_day(_t.time(), "zh") == "今日"
+    assert fmt.fmt_quote_day(_t.time() - 86_400, "zh") == "昨日"
+    assert "月" in fmt.fmt_quote_day(_t.time() - 5 * 86_400, "zh")
+    assert fmt.fmt_quote_day(_t.time() - 86_400, "en") == "yesterday"

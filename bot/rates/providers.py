@@ -182,6 +182,7 @@ class YahooFinanceProvider(RateProvider):
 
     name = "yahoo"
     kind = "mixed"
+    cadence = "realtime"
     priority = 10
     supports_history = True
 
@@ -303,6 +304,7 @@ class BinanceProvider(RateProvider):
 
     name = "binance"
     kind = "crypto"
+    cadence = "realtime"
     priority = 10
     supports_history = True
 
@@ -375,6 +377,7 @@ class OkxProvider(RateProvider):
 
     name = "okx"
     kind = "crypto"
+    cadence = "realtime"
     priority = 20
 
     async def fetch(self, wanted: Iterable[str] | None = None) -> ProviderResult:
@@ -404,6 +407,7 @@ class CoinGeckoProvider(RateProvider):
 
     name = "coingecko"
     kind = "crypto"
+    cadence = "realtime"
     priority = 40
 
     IDS: dict[str, str] = {
