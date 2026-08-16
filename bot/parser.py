@@ -77,11 +77,24 @@ _MATH_CHARS = set("0123456789.+-*/()^ \t")
 #: 键盘上打不出 × ÷ 的人会用别的字符代替，全角标点也很常见。
 #: 这些如果不认，会被当成噪声直接丢掉 —— `18×12` 变 `1812`，静默算错。
 _MATH_ALIASES = {
-    "×": "*", "✕": "*", "✖": "*", "∗": "*", "·": "*", "＊": "*",
-    "÷": "/", "∕": "/", "／": "/",
-    "＋": "+", "－": "-", "−": "-",
+    "×": "*", "✕": "*", "✖": "*", "❌": "*", "∗": "*", "·": "*", "＊": "*",
+    "÷": "/", "∕": "/", "／": "/", "⁄": "/", "➗": "/",
+    "＋": "+", "➕": "+",
+    "－": "-", "−": "-", "➖": "-",
     "（": "(", "）": ")",
 }
+#: 表情版的运算符（➗ ✖️）后面常跟一个变体选择符 U+FE0F，属于噪声，会被忽略。
+
+#: 直接写「除以」「乘以」的也不少。这些字要限制在数字中间才当运算符 ——
+#: 「加」本身就出现在货币名里（加元 / 加币），认宽了会把币种拆掉。
+_WORD_OPERATORS = {
+    "除以": "/", "除": "/",
+    "乘以": "*", "乘": "*",
+    "加上": "+", "加": "+",
+    "减去": "-", "减": "-",
+}
+#: 长的排前面，否则「除以」会被「除」先吃掉一半
+_WORD_OPERATORS_ORDERED = sorted(_WORD_OPERATORS, key=len, reverse=True)
 
 _REGIONAL_INDICATOR = range(0x1F1E6, 0x1F200)
 
@@ -201,6 +214,14 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
                 i += len(matched)
                 continue
 
+        # 放在货币名之后：「100加币」先被上面认成 CAD，轮不到这里当加号
+        word_op = _read_word_operator(text, i, segments[-1])
+        if word_op:
+            operator, length = word_op
+            segments[-1] = segments[-1].rstrip() + operator
+            i += length
+            continue
+
         if ch.isalpha() and ch.isascii():
             j = i
             while j < n and text[j].isalpha() and text[j].isascii():
@@ -214,7 +235,7 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
                 tuple("0123456789")
             ):
                 segments[-1] = segments[-1].rstrip() + _MAGNITUDE_LATIN[word.lower()]
-            elif word.lower() == "x" and _is_times(segments[-1], text, j):
+            elif word.lower() == "x" and _between_digits(segments[-1], text, j):
                 # 只在「数字 x 数字」这种夹心位置才当乘号。限得这么死是有原因的：
                 # x 也是货币代码的常用字母（MXN / XAU / XPF），但那些都是多字母词，
                 # 走上面的 resolve 分支，绝不会掉到这里来。
@@ -245,17 +266,26 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
     return codes, segments, unknown
 
 
-def _is_times(pending: str, text: str, after: int) -> bool:
-    """判断这个孤立的 x 是不是在当乘号用。
+def _between_digits(pending: str, text: str, after: int) -> bool:
+    """这个位置是不是夹在两个数字中间（中间可以有空格）。
 
-    要求两边都紧挨着数字（中间可以有空格），`18x12`、`18 x 12` 都算。
-    只有一边有数字就不算 —— `100 x` 这种残句宁可当噪声忽略，
-    也好过凭空多出一个乘号把金额算错。
+    `x`、`除以`、`加` 这些既是运算符也是别的东西：x 出现在货币代码里
+    （MXN / XAU），「加」出现在货币名里（加元 / 加币）。只有夹心位置才当运算符，
+    是最稳的判据 —— `100 x` 这种残句宁可当噪声忽略，
+    也好过凭空多出一个运算符把金额算错。
     """
     if not pending.rstrip().endswith(tuple("0123456789")):
         return False
     rest = text[after:].lstrip()
     return bool(rest) and rest[0].isdigit()
+
+
+def _read_word_operator(text: str, i: int, pending: str) -> tuple[str, int] | None:
+    """认「100除以4」这类中文运算词，返回 (运算符, 吃掉的字数)。"""
+    for word in _WORD_OPERATORS_ORDERED:
+        if text.startswith(word, i) and _between_digits(pending, text, i + len(word)):
+            return _WORD_OPERATORS[word], len(word)
+    return None
 
 
 def _normalize_expression(segment: str) -> str:

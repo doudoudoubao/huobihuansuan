@@ -163,3 +163,46 @@ def test_expression_is_echoed_only_when_something_was_computed():
 
     assert expression_hint(p("18x12 eur cny").expression) == "  <i>(18*12)</i>"
     assert expression_hint(p("100 usd cny").expression) == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "amount"),
+    [
+        ("100➗4 usd cny", 25),
+        ("100除以4 usd cny", 25),
+        ("100 除以 4 usd cny", 25),
+        ("100除4 usd cny", 25),
+        ("18乘以12 eur cny", 216),
+        ("18乘12 eur cny", 216),
+        ("100加50 usd cny", 150),
+        ("100加上50 usd cny", 150),
+        ("100减去20 usd cny", 80),
+        ("100➕50 usd cny", 150),
+        ("100➖20 usd cny", 80),
+        ("18❌12 eur cny", 216),
+        ("18✖️12 eur cny", 216),   # 表情后面跟着变体选择符 U+FE0F
+        ("2万3加500 usd cny", 23500),  # 中文量级 + 中文运算词
+    ],
+)
+def test_spoken_and_emoji_operators(text, amount):
+    assert p(text).amount == Decimal(str(amount))
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("100加币", "CAD"),
+        ("100 加元 人民币", "CAD"),
+        ("100加拿大元 人民币", "CAD"),
+        ("100新加坡元 人民币", "SGD"),
+        ("1000新加坡币 cny", "SGD"),
+    ],
+)
+def test_operator_words_never_split_a_currency_name(text, code):
+    """「加」既是加号也是加元/新加坡元的一部分，货币名必须先赢。"""
+    assert p(text).source == code
+    assert p(text).amount in (Decimal(100), Decimal(1000))
+
+
+def test_operator_word_needs_digits_on_both_sides():
+    assert p("100加 usd cny").amount == Decimal(100)
