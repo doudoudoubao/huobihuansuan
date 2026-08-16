@@ -52,14 +52,18 @@ _FEE_RE = re.compile(
 
 # --- 数量级后缀 ---------------------------------------------------------------
 
-_MAGNITUDE_CJK: tuple[tuple[str, str], ...] = (
-    ("亿", "*100000000"),
-    ("百万", "*1000000"),
-    ("千万", "*10000000"),
-    ("万", "*10000"),
-    ("千", "*1000"),
-    ("百", "*100"),
-)
+_MAGNITUDE_CJK: dict[str, int] = {
+    "亿": 100000000,
+    "千万": 10000000,
+    "百万": 1000000,
+    "万": 10000,
+    "千": 1000,
+    "百": 100,
+}
+
+#: 「数字 + 量级 + 可选尾数」。长单位排在前面，否则「千万」会被「千」先吃掉。
+#: 尾数后面不能再跟量级字：「1亿2千万」里的 2 属于后面的千万，不是亿的尾数。
+_MAGNITUDE_RE = re.compile(r"(\d+(?:\.\d+)?)(亿|千万|百万|万|千|百)(\d+(?![亿万千百]))?")
 
 _MAGNITUDE_LATIN: dict[str, str] = {
     "k": "*1000",
@@ -69,6 +73,15 @@ _MAGNITUDE_LATIN: dict[str, str] = {
 }
 
 _MATH_CHARS = set("0123456789.+-*/()^ \t")
+
+#: 键盘上打不出 × ÷ 的人会用别的字符代替，全角标点也很常见。
+#: 这些如果不认，会被当成噪声直接丢掉 —— `18×12` 变 `1812`，静默算错。
+_MATH_ALIASES = {
+    "×": "*", "✕": "*", "✖": "*", "∗": "*", "·": "*", "＊": "*",
+    "÷": "/", "∕": "/", "／": "/",
+    "＋": "+", "－": "-", "−": "-",
+    "（": "(", "）": ")",
+}
 
 _REGIONAL_INDICATOR = range(0x1F1E6, 0x1F200)
 
@@ -201,6 +214,11 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
                 tuple("0123456789")
             ):
                 segments[-1] = segments[-1].rstrip() + _MAGNITUDE_LATIN[word.lower()]
+            elif word.lower() == "x" and _is_times(segments[-1], text, j):
+                # 只在「数字 x 数字」这种夹心位置才当乘号。限得这么死是有原因的：
+                # x 也是货币代码的常用字母（MXN / XAU / XPF），但那些都是多字母词，
+                # 走上面的 resolve 分支，绝不会掉到这里来。
+                segments[-1] = segments[-1].rstrip() + "*"
             else:
                 unknown.append(word)
             i = j
@@ -208,6 +226,11 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
 
         if ch in _MATH_CHARS or ch == ",":
             segments[-1] += ch
+            i += 1
+            continue
+
+        if ch in _MATH_ALIASES:
+            segments[-1] += _MATH_ALIASES[ch]
             i += 1
             continue
 
@@ -222,6 +245,19 @@ def _scan(text: str, *, context: str | None) -> tuple[list[str], list[str], list
     return codes, segments, unknown
 
 
+def _is_times(pending: str, text: str, after: int) -> bool:
+    """判断这个孤立的 x 是不是在当乘号用。
+
+    要求两边都紧挨着数字（中间可以有空格），`18x12`、`18 x 12` 都算。
+    只有一边有数字就不算 —— `100 x` 这种残句宁可当噪声忽略，
+    也好过凭空多出一个乘号把金额算错。
+    """
+    if not pending.rstrip().endswith(tuple("0123456789")):
+        return False
+    rest = text[after:].lstrip()
+    return bool(rest) and rest[0].isdigit()
+
+
 def _normalize_expression(segment: str) -> str:
     expr = segment.strip()
     if not expr:
@@ -229,10 +265,41 @@ def _normalize_expression(segment: str) -> str:
     # 千分位逗号：仅当逗号夹在数字之间才删除
     expr = re.sub(r"(?<=\d),(?=\d{3}\b)", "", expr)
     expr = expr.replace(",", " ")
-    for token, repl in _MAGNITUDE_CJK:
-        expr = expr.replace(token, repl)
+    expr = _expand_magnitudes(expr)
     expr = expr.replace("^", "**")
-    return expr.strip()
+    return re.sub(r"\s+", " ", expr).strip()
+
+
+def _expand_magnitudes(expr: str) -> str:
+    """把「3万」「1万5」「1亿2千万」这类中文量级写法展开成算式。
+
+    中文数字有两条隐含规则，照字面替换成 `*10000` 会两条都踩空：
+
+    · 量级后跟**一位**数字，指的是次一级单位。「1万5」是 15000，不是 10005；
+      写全了的「1万2500」才是加原数。
+    · 相邻的量级段之间是**相加**。「1亿2千万」= 1亿 + 2千万。
+    """
+    parts: list[str] = []
+    cursor = prev_end = 0
+    for match in _MAGNITUDE_RE.finditer(expr):
+        head, unit, tail = match.group(1), match.group(2), match.group(3)
+        value = _MAGNITUDE_CJK[unit]
+        if not tail:
+            piece = f"({head}*{value})"
+        elif len(tail) == 1:
+            piece = f"({head}*{value}+{tail}*{value // 10})"
+        else:
+            piece = f"({head}*{value}+{tail})"
+
+        gap = expr[cursor:match.start()]
+        # 两段紧挨着（中间没有运算符）就是中文的连写，补一个加号
+        if cursor and match.start() == prev_end and not gap.strip():
+            parts.append("+")
+        parts.append(gap)
+        parts.append(piece)
+        cursor = prev_end = match.end()
+    parts.append(expr[cursor:])
+    return "".join(parts)
 
 
 _ALLOWED_NODES = (

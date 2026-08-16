@@ -104,3 +104,62 @@ def test_duplicates_are_collapsed():
     result = p("100 usd cny cny usd")
     assert result.source == "USD"
     assert result.targets == ["CNY"]
+
+
+# --- 算式 ---------------------------------------------------------------
+# 这一组盯的都是「静默算错」：解析不报错，但金额是错的。
+# 比报错危险得多 —— 用户看到一张正常的卡片，不会怀疑数字有问题。
+
+
+@pytest.mark.parametrize(
+    ("text", "amount"),
+    [
+        ("18*12 欧元 人民币", 216),
+        ("18x12 欧元 人民币", 216),      # 键盘上的 x 当乘号
+        ("18X12 eur cny", 216),
+        ("18 x 12 eur cny", 216),       # 两边带空格
+        ("18×12 欧元 人民币", 216),      # 真正的乘号
+        ("100÷4 usd cny", 25),
+        ("（10+2）×5 usd cny", 60),      # 全角括号
+        ("(3+4)*2 usd cny", 14),
+        ("12.5×3 美元 日元", "37.5"),
+        ("2^10 usd cny", 1024),
+    ],
+)
+def test_arithmetic_forms(text, amount):
+    assert p(text).amount == Decimal(str(amount))
+
+
+def test_x_is_only_a_times_sign_between_digits():
+    """x 也是货币代码里的常用字母，不能见到就当乘号。"""
+    assert p("1000 mxn cny").source == "MXN"
+    assert p("5 xau usd").source == "XAU"
+    # 只有一边是数字的残句，宁可当噪声忽略，也不能凭空多出一个乘号
+    assert p("100 x usd cny").amount == Decimal(100)
+
+
+@pytest.mark.parametrize(
+    ("text", "amount"),
+    [
+        ("1万 usd cny", 10000),
+        ("1万5 日元 人民币", 15000),      # 尾数落在次一级单位，不是 10005
+        ("2万3 usd cny", 23000),
+        ("2万3千 usd cny", 23000),
+        ("1万2500 usd cny", 12500),      # 写全了的尾数就是它本身
+        ("1亿2千万 日元 人民币", 120000000),  # 相邻量级段相加
+        ("1百5 usd cny", 150),
+        ("2.5万 usd cny", 25000),
+        ("3千 usd cny", 3000),
+        ("2万*3 usd cny", 60000),        # 量级和运算符混用
+        ("1万5+500 usd cny", 15500),
+    ],
+)
+def test_chinese_magnitudes(text, amount):
+    assert p(text).amount == Decimal(str(amount))
+
+
+def test_expression_is_echoed_only_when_something_was_computed():
+    from bot.formatting import expression_hint
+
+    assert expression_hint(p("18x12 eur cny").expression) == "  <i>(18*12)</i>"
+    assert expression_hint(p("100 usd cny").expression) == ""
