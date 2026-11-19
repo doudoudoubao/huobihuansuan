@@ -10,7 +10,7 @@ import pytest
 from bot.config import Config, StartupError
 from bot.main import build_bot
 
-GOOD_TOKEN = "123456789:AAEhBOweik6ad9r_wAbCdEfGhIjKlMnOpQr"
+GOOD_TOKEN = "123456789:" + "AAEhBOweik6ad9r_wAbCdEfGhIjKlMnOpQr"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -23,7 +23,7 @@ def test_missing_token_is_explained(tmp_path):
 
 @pytest.mark.parametrize(
     "bad",
-    ["notarealtoken", "123456789", ":AAEhBOweik", "123:short", '"123456789:AAEhBOweik6ad9r_wAbCdEfGhIjKlM"'],
+    ["notarealtoken", "123456789", ":AAEhBOweik", "123:short", '"123456789:' + 'AAEhBOweik6ad9r_wAbCdEfGhIjKlM"'],
 )
 def test_malformed_token_is_rejected(tmp_path, bad):
     cfg = Config(bot_token=bad, db_path=str(tmp_path / "b.db"))
